@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 Daily Automated Malayalam Everyday Curiosity, Science, Tech & Fact-Check Generator
-Fast-Render Edition (< 2 minutes on GitHub Actions):
-  - Coalesces word-level SRT cues into ~4-second phrase blocks (prevents 100+ FFmpeg overlay slowdowns).
-  - Fast downscaled background blur (scale 135x240 -> boxblur -> scale 1080x1920, 50x faster).
-  - Single-pass MoviePy/FFmpeg-free fast segment rendering so 60s videos finish in ~30-60s.
+Fast-Render + Auto-Thumbnail Edition:
+  - Auto-generates a colorful, high-CTR Malayalam curiosity thumbnail from the topic's
+    stock footage + bold HarfBuzz Malayalam question + "FACT CHECK / REALITY" badge.
+  - Uploads the custom thumbnail via YouTube Data API (`thumbnails.set`) when supported,
+    AND prepends a 0.6s visual hook frame at the start of the video for Shorts feeds.
+  - Coalesces word-level SRT cues into ~4-second phrase blocks (< 2 min total render).
 """
 
 import asyncio
@@ -29,7 +31,7 @@ from google.genai import types
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,9 @@ class ShortScriptPlan(BaseModel):
     )
     hook_headline_ml: str = Field(
         description="Short 4-to-7 word Malayalam headline shown at the top of the video frame."
+    )
+    thumbnail_question_ml: str = Field(
+        description="Punchy 3-to-5 word curiosity-sparking Malayalam question for the thumbnail (ending with '?' or '!')."
     )
     description: str = Field(
         description="Engaging Malayalam & English description explaining the fact or curiosity, plus 5-8 hashtags."
@@ -227,7 +232,8 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
 4. Target ~60 seconds (~115 to 145 Malayalam words; up to 2 minutes max if needed).
 5. End naturally before the subscribe line (we automatically append the channel's Malayalam subscribe outro).
 6. Keep 'narration_malayalam' strictly to spoken Malayalam script (no [Music], no speaker labels, no asterisks, no English letters).
-7. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
+7. Provide 'thumbnail_question_ml': a short 3-to-5 word curiosity-sparking Malayalam question that makes viewers want to click immediately.
+8. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
 """
 
     last_err = None
@@ -257,7 +263,7 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Voiceover — Natural Pacing Free edge-tts OR ElevenLabs Cloned Voice
+# Step 3: Voiceover
 # ---------------------------------------------------------------------------
 def get_media_duration(media_path: Path) -> float:
     cmd = [
@@ -419,8 +425,124 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Fast Video Assembly (< 2 mins on GitHub Actions)
+# Step 5: Auto-Generate Colorful High-CTR Thumbnail + Fast Video Assembly
 # ---------------------------------------------------------------------------
+def find_malayalam_font() -> str:
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansMalayalam-Bold.ttf",
+        "/usr/share/fonts/truetype/malayalam/Manjari-Bold.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansMalayalam-Regular.ttf",
+        "/usr/share/fonts/truetype/smc/Manjari-Bold.ttf",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return "DejaVuSans-Bold.ttf"
+
+
+def generate_curiosity_thumbnail(
+    lead_clip: Path, question_ml: str, out_jpg: Path, out_vertical_png: Path, font_path: str
+) -> None:
+    """
+    Creates two colorful curiosity thumbnails from the lead stock clip:
+      1) 1280x720 JPEG (for YouTube `thumbnails.set` API)
+      2) 1080x1920 PNG (used as a 0.6s opening hook frame for Shorts feeds)
+    """
+    raw_frame = out_jpg.parent / "thumb_raw_frame.jpg"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            "00:00:01.0",
+            "-i",
+            str(lead_clip),
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
+            str(raw_frame),
+        ],
+        check=True,
+    )
+
+    base = Image.open(raw_frame).convert("RGBA")
+    base = ImageEnhance.Color(base).enhance(1.35)
+    base = ImageEnhance.Contrast(base).enhance(1.15)
+
+    def build_card(target_w: int, target_h: int, is_vertical: bool) -> Image.Image:
+        # Scale & center-crop frame to target canvas
+        src_w, src_h = base.size
+        scale = max(target_w / src_w, target_h / src_h)
+        resized = base.resize((int(src_w * scale), int(src_h * scale)), Image.Resampling.LANCZOS)
+        left = (resized.width - target_w) // 2
+        top = (resized.height - target_h) // 2
+        canvas = resized.crop((left, top, left + target_w, top + target_h))
+
+        # Dark gradient scrim at bottom/center for crisp text pop
+        overlay = Image.new("RGBA", (target_w, target_h), (10, 16, 32, 95))
+        draw_ov = ImageDraw.Draw(overlay)
+        band_y0 = int(target_h * (0.48 if is_vertical else 0.36))
+        draw_ov.rectangle([0, band_y0, target_w, target_h], fill=(10, 16, 34, 195))
+        canvas = Image.alpha_composite(canvas, overlay)
+
+        draw = ImageDraw.Draw(canvas)
+        # Vibrant border frame
+        border_w = 18 if is_vertical else 14
+        draw.rectangle(
+            [border_w // 2, border_w // 2, target_w - border_w // 2, target_h - border_w // 2],
+            outline=(255, 214, 0, 255),
+            width=border_w,
+        )
+
+        # Top badge pill: "FACT CHECK | സത്യം എന്ത്?"
+        badge_font = ImageFont.truetype(font_path, 42 if is_vertical else 34)
+        badge_text = "FACT CHECK  |  സത്യം എന്ത്?"
+        bx0 = int(target_w * 0.14)
+        bx1 = int(target_w * 0.86)
+        by0 = int(target_h * (0.12 if is_vertical else 0.09))
+        by1 = by0 + (88 if is_vertical else 72)
+        draw.rounded_rectangle([bx0, by0, bx1, by1], radius=44, fill=(255, 61, 46, 255), outline=(255, 255, 255, 255), width=4)
+        draw.text((target_w // 2, (by0 + by1) // 2), badge_text, font=badge_font, fill=(255, 255, 255, 255), anchor="mm")
+
+        # Main big curiosity question in bright yellow
+        q_font = ImageFont.truetype(font_path, 76 if is_vertical else 66)
+        wrapped_q = textwrap.fill(question_ml, width=16 if is_vertical else 22)
+        q_y = int(target_h * (0.68 if is_vertical else 0.62))
+        draw.multiline_text(
+            (target_w // 2 + 4, q_y + 4),
+            wrapped_q,
+            font=q_font,
+            fill=(0, 0, 0, 230),
+            anchor="mm",
+            spacing=22,
+            align="center",
+        )
+        draw.multiline_text(
+            (target_w // 2, q_y),
+            wrapped_q,
+            font=q_font,
+            fill=(255, 235, 59, 255),
+            anchor="mm",
+            spacing=22,
+            align="center",
+        )
+
+        # Brand pill at bottom
+        brand_font = ImageFont.truetype(font_path, 34 if is_vertical else 28)
+        draw.text(
+            (target_w // 2, int(target_h * 0.90)),
+            "DAILY LOGIC MALAYALAM",
+            font=brand_font,
+            fill=(0, 229, 255, 255),
+            anchor="mm",
+        )
+        return canvas.convert("RGB")
+
+    build_card(1280, 720, False).save(out_jpg, quality=92)
+    build_card(1080, 1920, True).save(out_vertical_png)
+
+
 def parse_srt_time(ts: str) -> float:
     h, m, s_ms = ts.strip().split(":")
     s, ms = s_ms.split(",")
@@ -428,10 +550,6 @@ def parse_srt_time(ts: str) -> float:
 
 
 def parse_and_coalesce_srt(srt_path: Path, max_words_per_cue: int = 8) -> List[Tuple[float, float, str]]:
-    """
-    Coalesces word-level SRT cues into ~3-5 second phrase blocks (max ~15-18 cues total)
-    so FFmpeg renders in seconds instead of timing out on 100+ overlays.
-    """
     if not srt_path.exists():
         return []
     raw = srt_path.read_text(encoding="utf-8").strip()
@@ -469,19 +587,6 @@ def parse_and_coalesce_srt(srt_path: Path, max_words_per_cue: int = 8) -> List[T
     if buf_words:
         merged.append((buf_start, buf_end, " ".join(buf_words)))
     return merged
-
-
-def find_malayalam_font() -> str:
-    candidates = [
-        "/usr/share/fonts/truetype/noto/NotoSansMalayalam-Bold.ttf",
-        "/usr/share/fonts/truetype/malayalam/Manjari-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansMalayalam-Regular.ttf",
-        "/usr/share/fonts/truetype/smc/Manjari-Bold.ttf",
-    ]
-    for path in candidates:
-        if Path(path).exists():
-            return path
-    return "DejaVuSans-Bold.ttf"
 
 
 def render_malayalam_header_png(headline: str, out_png: Path, font_path: str) -> None:
@@ -549,6 +654,7 @@ def assemble_short_video(
     audio_path: Path,
     srt_path: Path,
     hook_headline: str,
+    thumb_vertical_png: Path,
     final_video_path: Path,
     work_dir: Path,
 ) -> None:
@@ -558,7 +664,6 @@ def assemble_short_video(
     normalized_clips: List[Path] = []
     for idx, clip in enumerate(clips):
         norm_path = work_dir / f"norm_{idx}.mp4"
-        # Fast downscaled background blur (135x240 -> boxblur -> 1080x1920) is 50x faster than 1080p blur
         vf_complex = (
             "[0:v]split=2[bg][fg];"
             "[bg]scale=135:240:force_original_aspect_ratio=increase,"
@@ -620,15 +725,23 @@ def assemble_short_video(
     header_png = work_dir / "header.png"
     render_malayalam_header_png(hook_headline, header_png, font_path)
 
-    cmd_inputs = ["-i", str(merged_bg_path), "-i", str(audio_path), "-i", str(header_png)]
-    filter_parts = ["[0:v][2:v]overlay=0:120[vhead]"]
-    last_label = "[vhead]"
+    cmd_inputs = [
+        "-i", str(merged_bg_path),
+        "-i", str(audio_path),
+        "-i", str(header_png),
+        "-i", str(thumb_vertical_png),
+    ]
+    filter_parts = [
+        "[0:v][2:v]overlay=0:120[vhead]",
+        "[vhead][3:v]overlay=0:0:enable='between(t,0,0.6)'[vhook]",
+    ]
+    last_label = "[vhook]"
 
     for idx, (start_t, end_t, text) in enumerate(cues):
         png_path = work_dir / f"sub_{idx}.png"
         render_malayalam_subtitle_png(text, png_path, font_path)
         cmd_inputs.extend(["-i", str(png_path)])
-        input_idx = idx + 3
+        input_idx = idx + 4
         out_label = f"[v{idx}]"
         filter_parts.append(
             f"{last_label}[{input_idx}:v]overlay=0:1390:enable='between(t,{start_t:.2f},{end_t:.2f})'{out_label}"
@@ -678,9 +791,9 @@ def assemble_short_video(
 
 
 # ---------------------------------------------------------------------------
-# Step 6A: Upload to YouTube Shorts via YouTube Data API v3 (Private by Default)
+# Step 6A: Upload Video + Custom Thumbnail to YouTube
 # ---------------------------------------------------------------------------
-def upload_to_youtube(video_path: Path, plan: ShortScriptPlan) -> str:
+def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) -> str:
     youtube = get_youtube_service()
 
     body = {
@@ -720,6 +833,17 @@ def upload_to_youtube(video_path: Path, plan: ShortScriptPlan) -> str:
 
     video_id = response["id"]
     print(f"[SUCCESS] Uploaded YouTube Video ({PRIVACY_STATUS})! URL: https://youtube.com/shorts/{video_id}")
+
+    # Attempt to set custom thumbnail via API (supported on standard videos; gracefully skipped if Shorts-restricted)
+    try:
+        youtube.thumbnails().set(
+            videoId=video_id,
+            media_body=MediaFileUpload(str(thumb_jpg), mimetype="image/jpeg"),
+        ).execute()
+        print("[SUCCESS] Custom curiosity thumbnail uploaded to YouTube!")
+    except Exception as exc:
+        print(f"[INFO] Custom thumbnail API skipped (Shorts uses the 0.6s opening hook frame): {exc}")
+
     return video_id
 
 
@@ -880,6 +1004,8 @@ def main() -> None:
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     audio_path = WORK_DIR / "voiceover.mp3"
     srt_path = WORK_DIR / "captions.srt"
+    thumb_jpg = WORK_DIR / "thumbnail.jpg"
+    thumb_vertical_png = WORK_DIR / "thumb_vertical.png"
     final_video_path = WORK_DIR / "final_short.mp4"
 
     print("[1/7] Finding a fresh Everyday Curiosity / Fact-Check topic...")
@@ -889,7 +1015,7 @@ def main() -> None:
     print("[2/7] Writing unique, human-tone Malayalam script with Gemini...")
     plan = generate_script_plan(topic_info["title"], topic_info["link"])
     print(f"      Title: {plan.title}")
-    print(f"      Search Queries: {plan.search_queries}")
+    print(f"      Thumbnail Hook: {plan.thumbnail_question_ml}")
 
     print("[3/7] Generating voiceover & subtitles...")
     create_voiceover_and_srt(plan.narration_malayalam, audio_path, srt_path)
@@ -897,17 +1023,27 @@ def main() -> None:
     print("[4/7] Downloading stock video clips...")
     clips = download_stock_clips(plan.search_queries, WORK_DIR)
 
-    print("[5/7] Rendering 1080x1920 vertical video with fast blurred framing, top header, & Malayalam captions...")
+    print("[5/7] Generating colorful curiosity thumbnail & rendering fast 1080x1920 video...")
+    font_path = find_malayalam_font()
+    generate_curiosity_thumbnail(
+        clips[0], plan.thumbnail_question_ml, thumb_jpg, thumb_vertical_png, font_path
+    )
     assemble_short_video(
-        clips, audio_path, srt_path, plan.hook_headline_ml, final_video_path, WORK_DIR
+        clips,
+        audio_path,
+        srt_path,
+        plan.hook_headline_ml,
+        thumb_vertical_png,
+        final_video_path,
+        WORK_DIR,
     )
 
     if SKIP_UPLOAD:
-        print("[SKIP] SKIP_UPLOAD=true — Video saved as GitHub Artifact for your preview without uploading.")
+        print("[SKIP] SKIP_UPLOAD=true — Video saved without uploading.")
         return
 
-    print(f"[6/7] Uploading to YouTube as {PRIVACY_STATUS.upper()} for your review...")
-    upload_to_youtube(final_video_path, plan)
+    print(f"[6/7] Uploading video & thumbnail to YouTube as {PRIVACY_STATUS.upper()}...")
+    upload_to_youtube(final_video_path, thumb_jpg, plan)
 
     if PRIVACY_STATUS == "public":
         print("[7/7] Cross-posting to Instagram Reels & Facebook Page Reels...")
