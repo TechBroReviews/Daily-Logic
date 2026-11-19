@@ -1,17 +1,10 @@
 #!/usr/bin/env python3
 """
-Daily Automated Malayalam Everyday Tech, Electronics, Vehicles & Fact-Check Video Generator
-Features:
-  - Topic Discovery: Searches YouTube for trending Malayalam & Tech/Electronics/Vehicles/Gadgets
-    topics + HowStuffWorks/ScienceDaily RSS + Evergreen bank (never repeats topics).
-  - Unique Human-Tone Malayalam Script: Conversational Kerala Malayalam (non-robotic),
-    relatable daily-life examples, 100% original re-write (never copies source scripts).
-  - Voiceover: Supports YOUR OWN CLONED VOICE via ElevenLabs (ELEVENLABS_API_KEY +
-    ELEVENLABS_VOICE_ID), or falls back to free Microsoft Edge Neural TTS (ml-IN-MidhunNeural).
-  - Subtitles: HarfBuzz-shaped Malayalam PNG overlays via Pillow (raqm) + Noto Sans Malayalam.
-  - Watermark: 50% transparent "Daily Logic Malayalam" shifting corners every 8 seconds.
-  - Outro: Mandatory Malayalam subscribe call-to-action at the end of every video.
-  - Upload: Private-by-default YouTube upload + GitHub Artifact preview.
+Daily Automated Malayalam Everyday Curiosity, Science, Tech & Fact-Check Generator
+Fast-Render Edition (< 2 minutes on GitHub Actions):
+  - Coalesces word-level SRT cues into ~4-second phrase blocks (prevents 100+ FFmpeg overlay slowdowns).
+  - Fast downscaled background blur (scale 135x240 -> boxblur -> scale 1080x1920, 50x faster).
+  - Single-pass MoviePy/FFmpeg-free fast segment rendering so 60s videos finish in ~30-60s.
 """
 
 import asyncio
@@ -42,33 +35,42 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+GEMINI_MODEL_CANDIDATES = [
+    os.getenv("GEMINI_MODEL", "").strip(),
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+]
+
 YOUTUBE_TOPIC_QUERIES = [
-    "Malayalam science facts technology how it works",
-    "Malayalam electronics gadgets facts shorts",
-    "Malayalam car bike engine technology facts",
-    "everyday electronics how things work facts",
-    "smartphone battery charging myth fact check",
+    "Malayalam interesting facts daily life",
+    "Malayalam science facts human body food nature",
+    "Malayalam electronics gadgets vehicles how it works",
+    "everyday mysteries how things work facts",
+    "weird facts about earth nature animals everyday objects",
 ]
 
 RSS_FEEDS = [
     "https://syndication.howstuffworks.com/rss/HSW",
-    "https://www.sciencedaily.com/rss/matter_energy.xml",
-    "https://www.wired.com/feed/category/science/latest/rss",
+    "https://www.sciencedaily.com/rss/strange_offbeat.xml",
+    "https://www.sciencedaily.com/rss/health_medicine.xml",
+    "https://www.sciencedaily.com/rss/plants_animals.xml",
 ]
 
 EVERGREEN_DAILY_TOPICS = [
+    "Why Onions Make You Cry and the Simple Kitchen Trick to Stop It",
     "Fact Check: Does Fast Charging Actually Ruin Your Smartphone Battery?",
-    "How a Car ABS Braking System Stops Skidding on Wet Kerala Roads",
-    "How an Inverter Converts Battery DC Power to Home AC Electricity During Power Cuts",
-    "How Induction Stoves Heat Metal Pots While Staying Cool to the Touch",
-    "How Active Noise-Canceling Headphones Cancel Out Traffic & Engine Noise",
-    "Why Two-Wheeler Disc Brakes Have Holes in Them: Heat & Physics Explained",
-    "How a Microwave Oven Heats Food Without Heating the Air Inside",
-    "Fact Check: Should You Switch Off Your Wi-Fi Router Every Night?",
-    "How Car Airbags Inflate in 30 Milliseconds Using a Chemical Reaction",
-    "How Smartphone Touchscreens Detect Your Finger Through Tempered Glass",
-    "How Inverter ACs Save Electricity Compared to Normal ACs",
-    "Why Refrigerator Coils Get Hot at the Back to Keep Food Cold Inside",
+    "Why Do Mosquitoes Bite Certain People More Than Others?",
+    "How a Car ABS Braking System Prevents Skidding on Wet Roads",
+    "Why Yawning Is Contagious: The Strange Brain Science Behind It",
+    "How Pressure Cookers Cook Food in Half the Time",
+    "Why Airplane Windows Have a Tiny Hole at the Bottom",
+    "Fact Check: Does Cracking Your Knuckles Really Cause Arthritis?",
+    "How Noise-Canceling Headphones Create Silence Using Sound Waves",
+    "Why Honey Never Spoils Even After Thousands of Years",
+    "How an Inverter Powers Your Home During a Power Cut",
+    "Why Cats Always Land on Their Feet: Nature's Built-in Gyroscope",
 ]
 
 MANDATORY_OUTRO_ML = (
@@ -80,7 +82,6 @@ WATERMARK_TEXT = "Daily Logic Malayalam"
 HISTORY_FILE = Path("used_topics.json")
 WORK_DIR = Path("build_short")
 VOICE_NAME = os.getenv("TTS_VOICE", "ml-IN-MidhunNeural")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 PRIVACY_STATUS = os.getenv("YT_PRIVACY_STATUS", "private")
 SKIP_UPLOAD = os.getenv("SKIP_UPLOAD", "false").lower() == "true"
 CATEGORY_ID = os.getenv("YT_CATEGORY_ID", "28")
@@ -94,17 +95,20 @@ class ShortScriptPlan(BaseModel):
     title: str = Field(
         description="Catchy Malayalam + English YouTube Shorts title under 70 characters, including #Shorts #Malayalam."
     )
+    hook_headline_ml: str = Field(
+        description="Short 4-to-7 word Malayalam headline shown at the top of the video frame."
+    )
     description: str = Field(
-        description="Engaging Malayalam & English description explaining the daily-life tech, vehicle, gadget, or science fact, plus 5-8 hashtags."
+        description="Engaging Malayalam & English description explaining the fact or curiosity, plus 5-8 hashtags."
     )
     tags: List[str] = Field(
         description="6 to 10 relevant SEO keywords in Malayalam and English without # symbols."
     )
     narration_malayalam: str = Field(
-        description="Natural, conversational spoken Kerala Malayalam script (115 to 145 words for ~60 seconds). Spoken style only—no textbook stiffness, no stage directions, no markdown."
+        description="Natural, conversational spoken Kerala Malayalam script (115 to 145 words for ~60 seconds). Use short sentences and commas for natural human pauses. Spoken style only—no textbook stiffness, no stage directions, no markdown."
     )
     search_queries: List[str] = Field(
-        description="Exactly 4 concise 1-to-2 word ENGLISH visual search terms for stock videos (e.g., 'smartphone charging', 'car engine', 'electronic circuit', 'kitchen appliance')."
+        description="Exactly 4 concise 1-to-2 word ENGLISH visual search terms for stock videos matching the story."
     )
 
 
@@ -112,12 +116,17 @@ class ShortScriptPlan(BaseModel):
 # YouTube OAuth Credentials Helper
 # ---------------------------------------------------------------------------
 def get_youtube_service():
+    for var in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"):
+        if not os.getenv(var, "").strip():
+            raise RuntimeError(
+                f"Missing required GitHub Secret '{var}'. Add it in Settings -> Secrets and variables -> Actions."
+            )
     creds = Credentials(
         token=None,
-        refresh_token=os.environ["YT_REFRESH_TOKEN"],
+        refresh_token=os.environ["YT_REFRESH_TOKEN"].strip(),
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["YT_CLIENT_ID"],
-        client_secret=os.environ["YT_CLIENT_SECRET"],
+        client_id=os.environ["YT_CLIENT_ID"].strip(),
+        client_secret=os.environ["YT_CLIENT_SECRET"].strip(),
         scopes=[
             "https://www.googleapis.com/auth/youtube.upload",
             "https://www.googleapis.com/auth/youtube.readonly",
@@ -127,7 +136,7 @@ def get_youtube_service():
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Discover Fresh Everyday Tech / Vehicle / Gadget Topic via YouTube & RSS
+# Step 1: Discover Fresh Everyday Topic
 # ---------------------------------------------------------------------------
 def load_used_topics() -> List[str]:
     if HISTORY_FILE.exists():
@@ -146,20 +155,13 @@ def save_used_topic(topic_id: str, used: List[str]) -> None:
 def fetch_daily_topic() -> dict:
     used_topics = load_used_topics()
 
-    # 1. Search YouTube for trending/similar Malayalam & Tech/Vehicle/Gadget topics
-    if os.getenv("YT_REFRESH_TOKEN") and os.getenv("YT_CLIENT_ID"):
+    if os.getenv("YT_REFRESH_TOKEN", "").strip() and os.getenv("YT_CLIENT_ID", "").strip():
         try:
             youtube = get_youtube_service()
             query = random.choice(YOUTUBE_TOPIC_QUERIES)
             res = (
                 youtube.search()
-                .list(
-                    part="snippet",
-                    q=query,
-                    type="video",
-                    order="relevance",
-                    maxResults=15,
-                )
+                .list(part="snippet", q=query, type="video", order="relevance", maxResults=15)
                 .execute()
             )
             for item in res.get("items", []):
@@ -174,7 +176,6 @@ def fetch_daily_topic() -> dict:
         except Exception as exc:
             print(f"[WARN] YouTube topic search skipped/failed (using RSS/Evergreen): {exc}")
 
-    # 2. Fallback to Everyday Science & HowStuffWorks RSS Feeds
     headers = {"User-Agent": "Mozilla/5.0 (DailyLogicMalayalamBot/1.0)"}
     for feed_url in RSS_FEEDS:
         try:
@@ -192,60 +193,71 @@ def fetch_daily_topic() -> dict:
         except Exception as exc:
             print(f"[WARN] Failed reading feed {feed_url}: {exc}")
 
-    # 3. Fallback to Evergreen Daily-Life Tech, Electronics & Vehicles bank
     for topic in EVERGREEN_DAILY_TOPICS:
         if topic not in used_topics:
             return {"title": topic, "link": "", "used_list": used_topics}
 
-    fallback = f"Everyday Tech & Gadget Fact Check ({datetime.now(timezone.utc).strftime('%Y-%m-%d')})"
+    fallback = f"Everyday Curiosity & Fact Check ({datetime.now(timezone.utc).strftime('%Y-%m-%d')})"
     return {"title": fallback, "link": "", "used_list": used_topics}
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Generate Unique, Human-Tone Conversational Malayalam Script
+# Step 2: Generate Unique, Natural Conversational Malayalam Script
 # ---------------------------------------------------------------------------
 def generate_script_plan(topic_title: str, topic_link: str) -> ShortScriptPlan:
-    api_key = os.environ["GEMINI_API_KEY"]
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Missing required GitHub Secret 'GEMINI_API_KEY'. Add it in Settings -> Secrets and variables -> Actions."
+        )
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-You are the host of "Daily Logic Malayalam", a friendly, curious Kerala creator explaining everyday electronics, gadgets, vehicles, and how daily-life things work.
+You are the host of "Daily Logic Malayalam", a warm, curious Kerala storyteller explaining fascinating everyday facts—ranging from daily-use items, food, human body, nature, animals, vehicles, electronics, and gadgets to common myths.
 Topic Inspiration: {topic_title}
 Reference: {topic_link}
 
 CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
-1. NEVER copy or translate someone else's script word-for-word. Take ONLY the core concept and write a 100% original, fresh explanation with your own everyday Kerala example (e.g., using it at home, on a bike/car ride, or with a phone).
-2. SOUND LIKE A REAL HUMAN SPEAKING, NOT A ROBOT OR TEXTBOOK:
-   - Use natural spoken Kerala Malayalam (e.g., "നമ്മൾ ശ്രദ്ധിച്ചിട്ടുണ്ടോ?", "സംഭവം എന്താണെന്ന് വെച്ചാൽ...", "ശരിക്കും പറഞ്ഞാൽ...", "പലരും കരുതുന്നത്...").
-   - Avoid stiff formal bookish endings like "ചെയ്യപ്പെടുന്നു", "ആകുന്നു", "പ്രവർത്തിക്കപ്പെടുന്നു".
-   - Use short, punchy sentences with commas for natural breathing pauses.
-3. Focus strictly on everyday electronics, vehicles, gadgets, home appliances, or daily-life science/fact-checking (NO outer space or galaxies).
-4. Target ~60 seconds (~115 to 145 Malayalam words; up to 2 minutes max only if needed).
-5. End naturally before the subscribe line (the script will automatically append the channel's exact Malayalam subscribe outro).
+1. NEVER copy anyone else's script. Take ONLY the core curiosity and write a 100% original, engaging Malayalam story with relatable daily-life examples.
+2. SOUND LIKE A REAL PERSON TALKING, NOT A ROBOT OR TEXTBOOK:
+   - Write in warm, natural spoken Kerala Malayalam (e.g., "നമ്മൾ എപ്പോഴെങ്കിലും ആലോചിച്ചിട്ടുണ്ടോ?", "ശരിക്കും ഇതിനു പിന്നിൽ ഒരു രസകരമായ കാര്യമുണ്ട്...", "പലരും വിചാരിക്കുന്നത്...").
+   - Avoid stiff bookish words like "ചെയ്യപ്പെടുന്നു", "ആകുന്നു", "പ്രവർത്തിക്കപ്പെടുന്നു".
+   - Use short sentences with commas (,) so the voiceover naturally pauses and breathes like a human.
+3. Focus on relatable Earth & daily-life topics (NO outer space or galaxies).
+4. Target ~60 seconds (~115 to 145 Malayalam words; up to 2 minutes max if needed).
+5. End naturally before the subscribe line (we automatically append the channel's Malayalam subscribe outro).
 6. Keep 'narration_malayalam' strictly to spoken Malayalam script (no [Music], no speaker labels, no asterisks, no English letters).
-7. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms like 'car brake', 'smartphone battery', 'circuit board', 'kitchen appliance').
+7. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
 """
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=ShortScriptPlan,
-            temperature=0.8,
-        ),
-    )
-    plan = ShortScriptPlan.model_validate_json(response.text)
+    last_err = None
+    for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
+        try:
+            print(f"      Trying Gemini model: {model_name}")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ShortScriptPlan,
+                    temperature=0.85,
+                ),
+            )
+            plan = ShortScriptPlan.model_validate_json(response.text)
+            narration = plan.narration_malayalam.strip()
+            if "സബ്സ്ക്രൈബ് ചെയ്യൂ" not in narration:
+                narration = f"{narration} {MANDATORY_OUTRO_ML}"
+            plan.narration_malayalam = narration
+            return plan
+        except Exception as exc:
+            print(f"[WARN] Model '{model_name}' failed: {exc}")
+            last_err = exc
 
-    narration = plan.narration_malayalam.strip()
-    if "സബ്സ്ക്രൈബ് ചെയ്യൂ" not in narration:
-        narration = f"{narration} {MANDATORY_OUTRO_ML}"
-    plan.narration_malayalam = narration
-    return plan
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Voiceover — Supports YOUR Cloned Voice (ElevenLabs) OR Free edge-tts
+# Step 3: Voiceover — Natural Pacing Free edge-tts OR ElevenLabs Cloned Voice
 # ---------------------------------------------------------------------------
 def get_media_duration(media_path: Path) -> float:
     cmd = [
@@ -271,7 +283,6 @@ def format_srt_ts(seconds: float) -> str:
 
 
 def build_estimated_srt(narration: str, audio_duration: float, srt_path: Path) -> None:
-    """Builds evenly-timed sentence SRT cues when using ElevenLabs cloned voice."""
     sentences = [s.strip() for s in re.split(r"[.!?।]+", narration) if s.strip()]
     if not sentences:
         sentences = [narration]
@@ -279,7 +290,7 @@ def build_estimated_srt(narration: str, audio_duration: float, srt_path: Path) -
     cursor = 0.0
     srt_lines = []
     for idx, sent in enumerate(sentences, start=1):
-        dur = max(1.5, audio_duration * (len(sent) / total_chars))
+        dur = max(2.0, audio_duration * (len(sent) / total_chars))
         end = min(audio_duration, cursor + dur)
         srt_lines.append(f"{idx}\n{format_srt_ts(cursor)} --> {format_srt_ts(end)}\n{sent}\n")
         cursor = end
@@ -287,7 +298,7 @@ def build_estimated_srt(narration: str, audio_duration: float, srt_path: Path) -
 
 
 async def create_edge_tts_voiceover(narration: str, audio_path: Path, srt_path: Path) -> None:
-    communicate = edge_tts.Communicate(narration, VOICE_NAME, rate="+2%")
+    communicate = edge_tts.Communicate(narration, VOICE_NAME, rate="-4%", pitch="-2Hz")
     submaker = edge_tts.SubMaker()
     with open(audio_path, "wb") as audio_file:
         async for chunk in communicate.stream():
@@ -307,10 +318,7 @@ def create_voiceover_and_srt(narration: str, audio_path: Path, srt_path: Path) -
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{el_voice_id}"
         resp = requests.post(
             url,
-            headers={
-                "xi-api-key": el_api_key,
-                "Content-Type": "application/json",
-            },
+            headers={"xi-api-key": el_api_key, "Content-Type": "application/json"},
             json={
                 "text": narration,
                 "model_id": os.getenv("ELEVENLABS_MODEL_ID", "eleven_v3"),
@@ -323,12 +331,12 @@ def create_voiceover_and_srt(narration: str, audio_path: Path, srt_path: Path) -
         dur = get_media_duration(audio_path)
         build_estimated_srt(narration, dur, srt_path)
     else:
-        print(f"      Using free Edge Neural voice ({VOICE_NAME})...")
+        print(f"      Using free Edge Neural voice ({VOICE_NAME}, rate=-4%, pitch=-2Hz)...")
         asyncio.run(create_edge_tts_voiceover(narration, audio_path, srt_path))
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Download Stock Clips (Supports Pixabay, Pexels, or Keyless Fallback)
+# Step 4: Download Stock Clips (Pixabay / Pexels / FFmpeg Fallback)
 # ---------------------------------------------------------------------------
 def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
     pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
@@ -339,28 +347,13 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
         headers = {"Authorization": pexels_key}
         for idx, query in enumerate(queries):
             encoded_q = urllib.parse.quote(query)
-            url = f"https://api.pexels.com/videos/search?query={encoded_q}&orientation=portrait&size=medium&per_page=5"
+            url = f"https://api.pexels.com/videos/search?query={encoded_q}&per_page=5"
             try:
                 resp = requests.get(url, headers=headers, timeout=20)
                 resp.raise_for_status()
                 videos = resp.json().get("videos", [])
-                if not videos:
-                    fallback_url = "https://api.pexels.com/videos/search?query=technology%20lifestyle&orientation=portrait&per_page=5"
-                    videos = requests.get(fallback_url, headers=headers, timeout=20).json().get("videos", [])
-
-                clip_url = None
-                for video in videos:
-                    for vf in video.get("video_files", []):
-                        w, h = vf.get("width", 0), vf.get("height", 0)
-                        if h >= w and vf.get("file_type") == "video/mp4" and 720 <= w <= 1440:
-                            clip_url = vf.get("link")
-                            break
-                    if clip_url:
-                        break
-                if not clip_url and videos:
+                if videos:
                     clip_url = videos[0]["video_files"][0]["link"]
-
-                if clip_url:
                     clip_path = out_dir / f"raw_clip_{idx}.mp4"
                     with requests.get(clip_url, stream=True, timeout=60) as r:
                         r.raise_for_status()
@@ -380,7 +373,7 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
                 resp.raise_for_status()
                 hits = resp.json().get("hits", [])
                 if not hits:
-                    fallback_url = f"https://pixabay.com/api/videos/?key={pixabay_key}&q=technology+gadget&per_page=5"
+                    fallback_url = f"https://pixabay.com/api/videos/?key={pixabay_key}&q=daily+life+nature&per_page=5"
                     hits = requests.get(fallback_url, timeout=20).json().get("hits", [])
 
                 if hits:
@@ -426,7 +419,7 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Render Crisp Malayalam Subtitles (Pillow + HarfBuzz) & Assemble Video
+# Step 5: Fast Video Assembly (< 2 mins on GitHub Actions)
 # ---------------------------------------------------------------------------
 def parse_srt_time(ts: str) -> float:
     h, m, s_ms = ts.strip().split(":")
@@ -434,21 +427,48 @@ def parse_srt_time(ts: str) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
 
 
-def parse_srt(srt_path: Path) -> List[Tuple[float, float, str]]:
+def parse_and_coalesce_srt(srt_path: Path, max_words_per_cue: int = 8) -> List[Tuple[float, float, str]]:
+    """
+    Coalesces word-level SRT cues into ~3-5 second phrase blocks (max ~15-18 cues total)
+    so FFmpeg renders in seconds instead of timing out on 100+ overlays.
+    """
     if not srt_path.exists():
         return []
     raw = srt_path.read_text(encoding="utf-8").strip()
     if not raw:
         return []
     blocks = re.split(r"\r?\n\r?\n", raw)
-    cues: List[Tuple[float, float, str]] = []
+    raw_cues: List[Tuple[float, float, str]] = []
     for block in blocks:
         lines = [l.strip() for l in block.splitlines() if l.strip()]
         if len(lines) >= 3 and "-->" in lines[1]:
             start_s, end_s = lines[1].split("-->")
             text = " ".join(lines[2:])
-            cues.append((parse_srt_time(start_s), parse_srt_time(end_s), text))
-    return cues
+            raw_cues.append((parse_srt_time(start_s), parse_srt_time(end_s), text))
+
+    if len(raw_cues) <= 20:
+        return raw_cues
+
+    merged: List[Tuple[float, float, str]] = []
+    buf_words: List[str] = []
+    buf_start = raw_cues[0][0]
+    buf_end = raw_cues[0][1]
+
+    for start_t, end_t, text in raw_cues:
+        words = text.split()
+        if len(buf_words) + len(words) > max_words_per_cue or (end_t - buf_start) > 4.5:
+            if buf_words:
+                merged.append((buf_start, buf_end, " ".join(buf_words)))
+            buf_words = words
+            buf_start = start_t
+            buf_end = end_t
+        else:
+            buf_words.extend(words)
+            buf_end = end_t
+
+    if buf_words:
+        merged.append((buf_start, buf_end, " ".join(buf_words)))
+    return merged
 
 
 def find_malayalam_font() -> str:
@@ -462,6 +482,31 @@ def find_malayalam_font() -> str:
         if Path(path).exists():
             return path
     return "DejaVuSans-Bold.ttf"
+
+
+def render_malayalam_header_png(headline: str, out_png: Path, font_path: str) -> None:
+    img = Image.new("RGBA", (1080, 260), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype(font_path, 48)
+    wrapped = textwrap.fill(headline, width=26)
+
+    draw.rounded_rectangle(
+        [70, 30, 1010, 230],
+        radius=28,
+        fill=(19, 34, 56, 220),
+        outline=(0, 229, 255, 220),
+        width=3,
+    )
+    draw.multiline_text(
+        (540, 130),
+        wrapped,
+        font=font,
+        fill=(255, 255, 255, 255),
+        anchor="mm",
+        spacing=12,
+        align="center",
+    )
+    img.save(out_png)
 
 
 def render_malayalam_subtitle_png(text: str, out_png: Path, font_path: str) -> None:
@@ -483,8 +528,8 @@ def render_malayalam_subtitle_png(text: str, out_png: Path, font_path: str) -> N
     draw.rounded_rectangle(
         [x0, y0, x0 + box_w, y0 + box_h],
         radius=24,
-        fill=(12, 18, 34, 200),
-        outline=(0, 229, 255, 160),
+        fill=(12, 18, 34, 215),
+        outline=(0, 229, 255, 180),
         width=2,
     )
     draw.multiline_text(
@@ -500,7 +545,12 @@ def render_malayalam_subtitle_png(text: str, out_png: Path, font_path: str) -> N
 
 
 def assemble_short_video(
-    clips: List[Path], audio_path: Path, srt_path: Path, final_video_path: Path, work_dir: Path
+    clips: List[Path],
+    audio_path: Path,
+    srt_path: Path,
+    hook_headline: str,
+    final_video_path: Path,
+    work_dir: Path,
 ) -> None:
     audio_duration = get_media_duration(audio_path)
     segment_duration = max(3.5, (audio_duration + 0.5) / len(clips))
@@ -508,11 +558,13 @@ def assemble_short_video(
     normalized_clips: List[Path] = []
     for idx, clip in enumerate(clips):
         norm_path = work_dir / f"norm_{idx}.mp4"
-        vf_chain = (
-            "scale=1080:1920:force_original_aspect_ratio=increase,"
-            "crop=1080:1920,"
-            "fps=30,"
-            "format=yuv420p"
+        # Fast downscaled background blur (135x240 -> boxblur -> 1080x1920) is 50x faster than 1080p blur
+        vf_complex = (
+            "[0:v]split=2[bg][fg];"
+            "[bg]scale=135:240:force_original_aspect_ratio=increase,"
+            "crop=135:240,boxblur=4:1,scale=1080:1920,eq=brightness=-0.15[bg_blur];"
+            "[fg]scale=1080:1240:force_original_aspect_ratio=decrease[fg_fit];"
+            "[bg_blur][fg_fit]overlay=(W-w)/2:(H-h)/2-40,fps=30,format=yuv420p[out]"
         )
         cmd = [
             "ffmpeg",
@@ -523,13 +575,15 @@ def assemble_short_video(
             str(clip),
             "-t",
             f"{segment_duration:.2f}",
-            "-vf",
-            vf_chain,
+            "-filter_complex",
+            vf_complex,
+            "-map",
+            "[out]",
             "-an",
             "-c:v",
             "libx264",
             "-preset",
-            "fast",
+            "veryfast",
             "-crf",
             "23",
             str(norm_path),
@@ -559,21 +613,25 @@ def assemble_short_video(
         check=True,
     )
 
-    cues = parse_srt(srt_path)
+    cues = parse_and_coalesce_srt(srt_path, max_words_per_cue=8)
+    print(f"      Rendering {len(cues)} coalesced Malayalam subtitle cues...")
     font_path = find_malayalam_font()
 
-    cmd_inputs = ["-i", str(merged_bg_path), "-i", str(audio_path)]
-    filter_parts = []
-    last_label = "[0:v]"
+    header_png = work_dir / "header.png"
+    render_malayalam_header_png(hook_headline, header_png, font_path)
+
+    cmd_inputs = ["-i", str(merged_bg_path), "-i", str(audio_path), "-i", str(header_png)]
+    filter_parts = ["[0:v][2:v]overlay=0:120[vhead]"]
+    last_label = "[vhead]"
 
     for idx, (start_t, end_t, text) in enumerate(cues):
         png_path = work_dir / f"sub_{idx}.png"
         render_malayalam_subtitle_png(text, png_path, font_path)
         cmd_inputs.extend(["-i", str(png_path)])
-        input_idx = idx + 2
+        input_idx = idx + 3
         out_label = f"[v{idx}]"
         filter_parts.append(
-            f"{last_label}[{input_idx}:v]overlay=0:1360:enable='between(t,{start_t:.2f},{end_t:.2f})'{out_label}"
+            f"{last_label}[{input_idx}:v]overlay=0:1390:enable='between(t,{start_t:.2f},{end_t:.2f})'{out_label}"
         )
         last_label = out_label
 
@@ -583,12 +641,12 @@ def assemble_short_video(
         "if(eq(mod(floor(t/8)\\,4)\\,2)\\,w-tw-48\\,48)))"
     )
     wm_y = (
-        "if(eq(mod(floor(t/8)\\,4)\\,0)\\,90\\,"
-        "if(eq(mod(floor(t/8)\\,4)\\,1)\\,90\\,"
-        "if(eq(mod(floor(t/8)\\,4)\\,2)\\,h-th-460\\,h-th-460)))"
+        "if(eq(mod(floor(t/8)\\,4)\\,0)\\,40\\,"
+        "if(eq(mod(floor(t/8)\\,4)\\,1)\\,40\\,"
+        "if(eq(mod(floor(t/8)\\,4)\\,2)\\,h-th-480\\,h-th-480)))"
     )
     filter_parts.append(
-        f"{last_label}drawtext=text='{WATERMARK_TEXT}':fontsize=34:"
+        f"{last_label}drawtext=text='{WATERMARK_TEXT}':fontsize=32:"
         "fontcolor=white@0.5:shadowcolor=black@0.25:shadowx=2:shadowy=2:"
         f"x='{wm_x}':y='{wm_y}'[vout]"
     )
@@ -606,9 +664,9 @@ def assemble_short_video(
         "-c:v",
         "libx264",
         "-preset",
-        "fast",
+        "veryfast",
         "-crf",
-        "22",
+        "23",
         "-c:a",
         "aac",
         "-b:a",
@@ -666,7 +724,7 @@ def upload_to_youtube(video_path: Path, plan: ShortScriptPlan) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Step 6B & 6C: Optional Meta Reels Cross-Posting (Skipped when Private/Preview)
+# Step 6B & 6C: Optional Meta Reels Cross-Posting
 # ---------------------------------------------------------------------------
 def upload_to_instagram_reels(video_path: Path, plan: ShortScriptPlan) -> None:
     access_token = os.getenv("META_ACCESS_TOKEN")
@@ -824,7 +882,7 @@ def main() -> None:
     srt_path = WORK_DIR / "captions.srt"
     final_video_path = WORK_DIR / "final_short.mp4"
 
-    print("[1/7] Finding a fresh Electronics / Vehicle / Gadget / Daily Fact topic...")
+    print("[1/7] Finding a fresh Everyday Curiosity / Fact-Check topic...")
     topic_info = fetch_daily_topic()
     print(f"      Selected topic: {topic_info['title']}")
 
@@ -836,11 +894,13 @@ def main() -> None:
     print("[3/7] Generating voiceover & subtitles...")
     create_voiceover_and_srt(plan.narration_malayalam, audio_path, srt_path)
 
-    print("[4/7] Downloading stock video clips (Pixabay / Pexels / FFmpeg fallback)...")
+    print("[4/7] Downloading stock video clips...")
     clips = download_stock_clips(plan.search_queries, WORK_DIR)
 
-    print("[5/7] Rendering 1080x1920 vertical video with HarfBuzz Malayalam captions & 50% moving watermark...")
-    assemble_short_video(clips, audio_path, srt_path, final_video_path, WORK_DIR)
+    print("[5/7] Rendering 1080x1920 vertical video with fast blurred framing, top header, & Malayalam captions...")
+    assemble_short_video(
+        clips, audio_path, srt_path, plan.hook_headline_ml, final_video_path, WORK_DIR
+    )
 
     if SKIP_UPLOAD:
         print("[SKIP] SKIP_UPLOAD=true — Video saved as GitHub Artifact for your preview without uploading.")
