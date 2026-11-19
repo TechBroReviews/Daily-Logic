@@ -2,10 +2,12 @@ name: Daily Logic Malayalam Shorts + Reels Automation
 
 on:
   schedule:
-    # 12:30 UTC = 6:00 PM IST -> Generate video, upload YouTube (Private), schedule FB Reel (8:00 PM IST)
+    # 12:30 UTC = 6:00 PM IST -> Generate video, upload YouTube (Private), cache for IG & FB
     - cron: "30 12 * * *"
     # 13:30 UTC = 7:00 PM IST -> Publish the same video to Instagram Reels
     - cron: "30 13 * * *"
+    # 14:30 UTC = 8:00 PM IST -> Publish the same video to Facebook Page Reels
+    - cron: "30 14 * * *"
   workflow_dispatch:
     inputs:
       action_mode:
@@ -16,13 +18,14 @@ on:
         options:
           - "full_6pm_build"
           - "publish_ig_now"
+          - "publish_fb_now"
 
 permissions:
   contents: write
   actions: read
 
 jobs:
-  build-youtube-and-schedule-fb:
+  build-youtube-6pm:
     if: github.event.schedule == '30 12 * * *' || github.event.inputs.action_mode == 'full_6pm_build'
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -47,7 +50,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pillow google-genai edge-tts requests pydantic google-api-python-client google-auth google-auth-oauthlib
 
-      - name: Run 6:00 PM IST generator (YouTube Private + Facebook Scheduled 8:00 PM IST)
+      - name: Run 6:00 PM IST generator (YouTube Private + cache for IG/FB Reels)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
@@ -57,13 +60,10 @@ jobs:
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           YT_PRIVACY_STATUS: "private"
           TTS_VOICE: "ml-IN-MidhunNeural"
-          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
-          FB_VIDEO_STATE: "SCHEDULED"
         run: |
           python generate_short.py
 
-      - name: Cache rendered video for 7:00 PM IST Instagram Reels publish (1-day retention)
+      - name: Cache rendered video for 7:00 PM IG & 8:00 PM FB Reels (1-day retention)
         if: hashFiles('build_short/final_short.mp4') != ''
         uses: actions/upload-artifact@v4
         with:
@@ -118,3 +118,40 @@ jobs:
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
         run: |
           python generate_short.py --publish-ig-only
+
+  publish-facebook-reel-8pm:
+    if: github.event.schedule == '30 14 * * *' || github.event.inputs.action_mode == 'publish_fb_now'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download today's rendered video from latest 6:00 PM IST run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$RUN_ID" ]; then
+            mkdir -p build_short
+            gh run download "$RUN_ID" --name daily-ig-reel-handoff --dir build_short
+          fi
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies for Meta Graph API
+        run: |
+          pip install requests pillow google-genai edge-tts pydantic google-api-python-client google-auth google-auth-oauthlib
+
+      - name: Publish to Facebook Page Reels at 8:00 PM IST
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_VIDEO_STATE: "PUBLISHED"
+        run: |
+          python generate_short.py --publish-fb-only
