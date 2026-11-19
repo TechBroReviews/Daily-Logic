@@ -2,10 +2,11 @@
 """
 Daily Automated Malayalam Everyday Tech, Electronics, Vehicles & Fact-Check Video Generator
 Features:
+  - Auto-fallback across current Gemini models (gemini-3.8-flash -> gemini-3.6-flash -> gemini-3.5-flash-lite -> gemini-2.5-flash)
   - Topic Discovery: Searches YouTube for trending Malayalam & Tech/Electronics/Vehicles/Gadgets
     topics + HowStuffWorks/ScienceDaily RSS + Evergreen bank (never repeats topics).
   - Unique Human-Tone Malayalam Script: Conversational Kerala Malayalam (non-robotic),
-    relatable daily-life examples, 100% original re-write (never copies source scripts).
+    relatable daily-life examples, 100% original re-write.
   - Voiceover: Supports YOUR OWN CLONED VOICE via ElevenLabs (ELEVENLABS_API_KEY +
     ELEVENLABS_VOICE_ID), or falls back to free Microsoft Edge Neural TTS (ml-IN-MidhunNeural).
   - Subtitles: HarfBuzz-shaped Malayalam PNG overlays via Pillow (raqm) + Noto Sans Malayalam.
@@ -42,6 +43,14 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+GEMINI_MODEL_CANDIDATES = [
+    os.getenv("GEMINI_MODEL", "").strip(),
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+]
+
 YOUTUBE_TOPIC_QUERIES = [
     "Malayalam science facts technology how it works",
     "Malayalam electronics gadgets facts shorts",
@@ -80,7 +89,6 @@ WATERMARK_TEXT = "Daily Logic Malayalam"
 HISTORY_FILE = Path("used_topics.json")
 WORK_DIR = Path("build_short")
 VOICE_NAME = os.getenv("TTS_VOICE", "ml-IN-MidhunNeural")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 PRIVACY_STATUS = os.getenv("YT_PRIVACY_STATUS", "private")
 SKIP_UPLOAD = os.getenv("SKIP_UPLOAD", "false").lower() == "true"
 CATEGORY_ID = os.getenv("YT_CATEGORY_ID", "28")
@@ -112,12 +120,17 @@ class ShortScriptPlan(BaseModel):
 # YouTube OAuth Credentials Helper
 # ---------------------------------------------------------------------------
 def get_youtube_service():
+    for var in ("YT_CLIENT_ID", "YT_CLIENT_SECRET", "YT_REFRESH_TOKEN"):
+        if not os.getenv(var, "").strip():
+            raise RuntimeError(
+                f"Missing required GitHub Secret '{var}'. Add it in Settings -> Secrets and variables -> Actions."
+            )
     creds = Credentials(
         token=None,
-        refresh_token=os.environ["YT_REFRESH_TOKEN"],
+        refresh_token=os.environ["YT_REFRESH_TOKEN"].strip(),
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["YT_CLIENT_ID"],
-        client_secret=os.environ["YT_CLIENT_SECRET"],
+        client_id=os.environ["YT_CLIENT_ID"].strip(),
+        client_secret=os.environ["YT_CLIENT_SECRET"].strip(),
         scopes=[
             "https://www.googleapis.com/auth/youtube.upload",
             "https://www.googleapis.com/auth/youtube.readonly",
@@ -146,8 +159,7 @@ def save_used_topic(topic_id: str, used: List[str]) -> None:
 def fetch_daily_topic() -> dict:
     used_topics = load_used_topics()
 
-    # 1. Search YouTube for trending/similar Malayalam & Tech/Vehicle/Gadget topics
-    if os.getenv("YT_REFRESH_TOKEN") and os.getenv("YT_CLIENT_ID"):
+    if os.getenv("YT_REFRESH_TOKEN", "").strip() and os.getenv("YT_CLIENT_ID", "").strip():
         try:
             youtube = get_youtube_service()
             query = random.choice(YOUTUBE_TOPIC_QUERIES)
@@ -174,7 +186,6 @@ def fetch_daily_topic() -> dict:
         except Exception as exc:
             print(f"[WARN] YouTube topic search skipped/failed (using RSS/Evergreen): {exc}")
 
-    # 2. Fallback to Everyday Science & HowStuffWorks RSS Feeds
     headers = {"User-Agent": "Mozilla/5.0 (DailyLogicMalayalamBot/1.0)"}
     for feed_url in RSS_FEEDS:
         try:
@@ -192,7 +203,6 @@ def fetch_daily_topic() -> dict:
         except Exception as exc:
             print(f"[WARN] Failed reading feed {feed_url}: {exc}")
 
-    # 3. Fallback to Evergreen Daily-Life Tech, Electronics & Vehicles bank
     for topic in EVERGREEN_DAILY_TOPICS:
         if topic not in used_topics:
             return {"title": topic, "link": "", "used_list": used_topics}
@@ -205,7 +215,11 @@ def fetch_daily_topic() -> dict:
 # Step 2: Generate Unique, Human-Tone Conversational Malayalam Script
 # ---------------------------------------------------------------------------
 def generate_script_plan(topic_title: str, topic_link: str) -> ShortScriptPlan:
-    api_key = os.environ["GEMINI_API_KEY"]
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "Missing required GitHub Secret 'GEMINI_API_KEY'. Add it in Settings -> Secrets and variables -> Actions."
+        )
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
@@ -226,22 +240,30 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
 7. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms like 'car brake', 'smartphone battery', 'circuit board', 'kitchen appliance').
 """
 
-    response = client.models.generate_content(
-        model=GEMINI_MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=ShortScriptPlan,
-            temperature=0.8,
-        ),
-    )
-    plan = ShortScriptPlan.model_validate_json(response.text)
+    last_err = None
+    for model_name in [m for m in GEMINI_MODEL_CANDIDATES if m]:
+        try:
+            print(f"      Trying Gemini model: {model_name}")
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ShortScriptPlan,
+                    temperature=0.8,
+                ),
+            )
+            plan = ShortScriptPlan.model_validate_json(response.text)
+            narration = plan.narration_malayalam.strip()
+            if "സബ്സ്ക്രൈബ് ചെയ്യൂ" not in narration:
+                narration = f"{narration} {MANDATORY_OUTRO_ML}"
+            plan.narration_malayalam = narration
+            return plan
+        except Exception as exc:
+            print(f"[WARN] Model '{model_name}' failed: {exc}")
+            last_err = exc
 
-    narration = plan.narration_malayalam.strip()
-    if "സബ്സ്ക്രൈബ് ചെയ്യൂ" not in narration:
-        narration = f"{narration} {MANDATORY_OUTRO_ML}"
-    plan.narration_malayalam = narration
-    return plan
+    raise RuntimeError(f"All Gemini models failed. Last error: {last_err}")
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +293,6 @@ def format_srt_ts(seconds: float) -> str:
 
 
 def build_estimated_srt(narration: str, audio_duration: float, srt_path: Path) -> None:
-    """Builds evenly-timed sentence SRT cues when using ElevenLabs cloned voice."""
     sentences = [s.strip() for s in re.split(r"[.!?।]+", narration) if s.strip()]
     if not sentences:
         sentences = [narration]
@@ -666,7 +687,7 @@ def upload_to_youtube(video_path: Path, plan: ShortScriptPlan) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Step 6B & 6C: Optional Meta Reels Cross-Posting (Skipped when Private/Preview)
+# Step 6B & 6C: Optional Meta Reels Cross-Posting
 # ---------------------------------------------------------------------------
 def upload_to_instagram_reels(video_path: Path, plan: ShortScriptPlan) -> None:
     access_token = os.getenv("META_ACCESS_TOKEN")
