@@ -785,14 +785,20 @@ def assemble_short_video(
         "1:a:0",
         "-c:v",
         "libx264",
+        "-pix_fmt",
+        "yuv420p",
         "-preset",
         "veryfast",
         "-crf",
         "23",
         "-c:a",
         "aac",
+        "-ar",
+        "44100",
         "-b:a",
         "192k",
+        "-movflags",
+        "+faststart",
         "-shortest",
         str(final_video_path),
     ]
@@ -865,40 +871,55 @@ def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
         print("[SKIP] Instagram Reels skipped (META_ACCESS_TOKEN or IG_USER_ID not set).")
         return
 
-    file_size = video_path.stat().st_size
+    video_bytes = video_path.read_bytes()
+    file_size = len(video_bytes)
     init_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media"
-    # thumb_offset="0" uses the colorful 0.6s curiosity thumbnail frame at the start of the video
-    init_resp = requests.post(
-        init_url,
-        data={
-            "media_type": "REELS",
-            "upload_type": "resumable",
-            "caption": caption,
-            "thumb_offset": "0",
-            "share_to_feed": "true",
-            "access_token": access_token,
-        },
-        timeout=30,
-    )
-    init_resp.raise_for_status()
-    container_data = init_resp.json()
-    container_id = container_data["id"]
-    upload_uri = container_data.get(
-        "uri", f"https://rupload.facebook.com/ig-api-upload/{GRAPH_API_VERSION}/{container_id}"
-    )
 
-    with open(video_path, "rb") as f:
+    container_id = None
+    for attempt in range(1, 3):
+        # thumb_offset="0" uses the colorful 0.6s curiosity thumbnail frame at the start of the video
+        init_resp = requests.post(
+            init_url,
+            data={
+                "media_type": "REELS",
+                "upload_type": "resumable",
+                "caption": caption,
+                "thumb_offset": "0",
+                "share_to_feed": "true",
+                "access_token": access_token,
+            },
+            timeout=30,
+        )
+        if not init_resp.ok:
+            print(f"[ERROR] Instagram init HTTP {init_resp.status_code}: {init_resp.text}")
+            init_resp.raise_for_status()
+        container_data = init_resp.json()
+        container_id = container_data["id"]
+        upload_uri = container_data.get(
+            "uri", f"https://rupload.facebook.com/ig-api-upload/{GRAPH_API_VERSION}/{container_id}"
+        )
+
         rupload_resp = requests.post(
             upload_uri,
             headers={
                 "Authorization": f"OAuth {access_token}",
                 "offset": "0",
                 "file_size": str(file_size),
+                "Content-Length": str(file_size),
+                "Content-Type": "application/octet-stream",
             },
-            data=f,
+            data=video_bytes,
             timeout=180,
         )
-        rupload_resp.raise_for_status()
+        if rupload_resp.ok:
+            break
+        print(
+            f"[WARN] Instagram rupload attempt {attempt} failed "
+            f"(HTTP {rupload_resp.status_code}): {rupload_resp.text}"
+        )
+        if attempt == 2:
+            rupload_resp.raise_for_status()
+        time.sleep(5)
 
     status_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{container_id}"
     for _ in range(20):
@@ -934,34 +955,40 @@ def upload_to_facebook_reels(
         print("[SKIP] Facebook Reels skipped (META_ACCESS_TOKEN or FB_PAGE_ID not set).")
         return
 
-    file_size = video_path.stat().st_size
+    video_bytes = video_path.read_bytes()
+    file_size = len(video_bytes)
     start_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{fb_page_id}/video_reels"
     start_resp = requests.post(
         start_url,
         data={"upload_phase": "start", "access_token": access_token},
         timeout=30,
     )
-    start_resp.raise_for_status()
+    if not start_resp.ok:
+        print(f"[ERROR] Facebook start HTTP {start_resp.status_code}: {start_resp.text}")
+        start_resp.raise_for_status()
     start_data = start_resp.json()
     video_id = start_data["video_id"]
     upload_url = start_data.get(
         "upload_url", f"https://rupload.facebook.com/video-upload/{GRAPH_API_VERSION}/{video_id}"
     )
 
-    with open(video_path, "rb") as f:
-        up_resp = requests.post(
-            upload_url,
-            headers={
-                "Authorization": f"OAuth {access_token}",
-                "offset": "0",
-                "file_size": str(file_size),
-            },
-            data=f,
-            timeout=180,
-        )
+    up_resp = requests.post(
+        upload_url,
+        headers={
+            "Authorization": f"OAuth {access_token}",
+            "offset": "0",
+            "file_size": str(file_size),
+            "Content-Length": str(file_size),
+            "Content-Type": "application/octet-stream",
+        },
+        data=video_bytes,
+        timeout=180,
+    )
+    if not up_resp.ok:
+        print(f"[ERROR] Facebook upload HTTP {up_resp.status_code}: {up_resp.text}")
         up_resp.raise_for_status()
 
-    fb_state = os.getenv("FB_VIDEO_STATE", "SCHEDULED").upper()
+    fb_state = os.getenv("FB_VIDEO_STATE", "PUBLISHED").upper()
     finish_payload = {
         "upload_phase": "finish",
         "video_id": video_id,
@@ -975,7 +1002,9 @@ def upload_to_facebook_reels(
         finish_payload["scheduled_publish_time"] = str(publish_ts)
 
     finish_resp = requests.post(start_url, data=finish_payload, timeout=30)
-    finish_resp.raise_for_status()
+    if not finish_resp.ok:
+        print(f"[ERROR] Facebook finish HTTP {finish_resp.status_code}: {finish_resp.text}")
+        finish_resp.raise_for_status()
     print(f"[SUCCESS] Facebook Page Reel ({fb_state}) with tags! Video ID: {video_id}")
 
 
@@ -1018,6 +1047,15 @@ def main() -> None:
             return
         meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
         upload_to_instagram_reels(final_video_path, meta["reels_caption"])
+        return
+
+    if "--publish-fb-only" in sys.argv:
+        final_video_path = WORK_DIR / "final_short.mp4"
+        if not final_video_path.exists() or not META_CACHE_FILE.exists():
+            print("[SKIP] No cached video found for 8:00 PM Facebook Reels publish.")
+            return
+        meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
+        upload_to_facebook_reels(final_video_path, meta["title"], meta["reels_caption"])
         return
 
     WORK_DIR.mkdir(parents=True, exist_ok=True)
@@ -1069,19 +1107,11 @@ def main() -> None:
         print("[SKIP] SKIP_UPLOAD=true — Video saved without uploading.")
         return
 
-    print(f"[6/7] Uploading video & thumbnail to YouTube as {PRIVACY_STATUS.upper()}...")
+    print(f"[6/6] Uploading video & thumbnail to YouTube as {PRIVACY_STATUS.upper()}...")
     upload_to_youtube(final_video_path, thumb_jpg, plan)
 
-    print("[7/7] Scheduling Facebook Page Reel for 8:00 PM IST (+120 min)...")
-    try:
-        upload_to_facebook_reels(
-            final_video_path, plan.title, reels_caption, delay_minutes=120
-        )
-    except Exception as exc:
-        print(f"[WARN] Facebook Reels scheduling failed: {exc}")
-
     save_used_topic(topic_info["title"], topic_info["used_list"])
-    print("[DONE] 6:00 PM build finished (YouTube Private + Facebook Scheduled for 8:00 PM IST).")
+    print("[DONE] 6:00 PM build finished (YouTube Private + cached for 7 PM IG & 8 PM FB Reels).")
 
 
 if __name__ == "__main__":
