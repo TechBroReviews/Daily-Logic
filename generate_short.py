@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Daily Automated Malayalam Everyday Curiosity, Science, Tech & Fact-Check Generator
-Fast-Render + Auto-Thumbnail Edition:
-  - Auto-generates a colorful, high-CTR Malayalam curiosity thumbnail from the topic's
-    stock footage + bold HarfBuzz Malayalam question + "FACT CHECK / REALITY" badge.
-  - Uploads the custom thumbnail via YouTube Data API (`thumbnails.set`) when supported,
-    AND prepends a 0.6s visual hook frame at the start of the video for Shorts feeds.
-  - Coalesces word-level SRT cues into ~4-second phrase blocks (< 2 min total render).
+Updates:
+  - Trending Topic Discovery: Queries recent high-view YouTube videos (last 7 days,
+    sorted by viewCount) + Google Trends India RSS + HowStuffWorks/ScienceDaily RSS.
+  - Branded Cross-Platform Outro: Mentions "Daily Logic Malayalam" and asks viewers to
+    both Follow (IG/FB) and Subscribe (YouTube).
+  - IG & FB Reels Cover Thumbnail + Hashtags: Passes `thumb_offset="0"` on Instagram
+    Reels (using the 0.6s colorful curiosity cover frame) + platform-tailored Reels tags.
 """
 
 import asyncio
@@ -20,7 +21,7 @@ import textwrap
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Tuple
 
@@ -46,18 +47,18 @@ GEMINI_MODEL_CANDIDATES = [
 ]
 
 YOUTUBE_TOPIC_QUERIES = [
-    "Malayalam interesting facts daily life",
-    "Malayalam science facts human body food nature",
-    "Malayalam electronics gadgets vehicles how it works",
-    "everyday mysteries how things work facts",
-    "weird facts about earth nature animals everyday objects",
+    "Malayalam interesting facts trending",
+    "Malayalam science technology gadgets facts",
+    "Malayalam car bike electronics how it works",
+    "how things work everyday science viral",
+    "amazing facts daily life earth nature",
 ]
 
 RSS_FEEDS = [
+    "https://trends.google.com/trending/rss?geo=IN",
     "https://syndication.howstuffworks.com/rss/HSW",
     "https://www.sciencedaily.com/rss/strange_offbeat.xml",
     "https://www.sciencedaily.com/rss/health_medicine.xml",
-    "https://www.sciencedaily.com/rss/plants_animals.xml",
 ]
 
 EVERGREEN_DAILY_TOPICS = [
@@ -75,14 +76,16 @@ EVERGREEN_DAILY_TOPICS = [
     "Why Cats Always Land on Their Feet: Nature's Built-in Gyroscope",
 ]
 
+# Branded outro covering YouTube (Subscribe) + Instagram/Facebook (Follow)
 MANDATORY_OUTRO_ML = (
     "ഇത്തരം കൗതുകകരവും ഇൻട്രെസ്റ്റിംഗും ആയിട്ടുള്ള കണ്ടെന്റുകൾ കൂടുതൽ കാണുന്നതിന് "
-    "ഈ ചാനൽ സബ്സ്ക്രൈബ് ചെയ്യൂ."
+    "ഡെയിലി ലോജിക് മലയാളം എന്ന നമ്മുടെ പേജും ചാനലും ഫോളോ ചെയ്യാനും സബ്സ്ക്രൈബ് ചെയ്യാനും മറക്കല്ലേ."
 )
 
 WATERMARK_TEXT = "Daily Logic Malayalam"
 HISTORY_FILE = Path("used_topics.json")
 WORK_DIR = Path("build_short")
+META_CACHE_FILE = WORK_DIR / "meta_payload.json"
 VOICE_NAME = os.getenv("TTS_VOICE", "ml-IN-MidhunNeural")
 PRIVACY_STATUS = os.getenv("YT_PRIVACY_STATUS", "private")
 SKIP_UPLOAD = os.getenv("SKIP_UPLOAD", "false").lower() == "true"
@@ -104,7 +107,10 @@ class ShortScriptPlan(BaseModel):
         description="Punchy 3-to-5 word curiosity-sparking Malayalam question for the thumbnail (ending with '?' or '!')."
     )
     description: str = Field(
-        description="Engaging Malayalam & English description explaining the fact or curiosity, plus 5-8 hashtags."
+        description="Engaging Malayalam & English YouTube description explaining the fact or curiosity, plus 5-8 YouTube hashtags."
+    )
+    reels_caption_ml: str = Field(
+        description="Engaging Instagram & Facebook Reels caption in Malayalam + English with 10-12 trending hashtags including #DailyLogicMalayalam #MalayalamReels #KeralaReels #MalayalamFacts #ScienceMalayalam."
     )
     tags: List[str] = Field(
         description="6 to 10 relevant SEO keywords in Malayalam and English without # symbols."
@@ -141,7 +147,7 @@ def get_youtube_service():
 
 
 # ---------------------------------------------------------------------------
-# Step 1: Discover Fresh Everyday Topic
+# Step 1: Discover Trending Topics (Recent High-View YouTube + Google Trends + RSS)
 # ---------------------------------------------------------------------------
 def load_used_topics() -> List[str]:
     if HISTORY_FILE.exists():
@@ -160,13 +166,24 @@ def save_used_topic(topic_id: str, used: List[str]) -> None:
 def fetch_daily_topic() -> dict:
     used_topics = load_used_topics()
 
+    # 1. Search recent (last 7 days) high-view YouTube videos for trending topics
     if os.getenv("YT_REFRESH_TOKEN", "").strip() and os.getenv("YT_CLIENT_ID", "").strip():
         try:
             youtube = get_youtube_service()
             query = random.choice(YOUTUBE_TOPIC_QUERIES)
+            published_after = (datetime.now(timezone.utc) - timedelta(days=7)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            )
             res = (
                 youtube.search()
-                .list(part="snippet", q=query, type="video", order="relevance", maxResults=15)
+                .list(
+                    part="snippet",
+                    q=query,
+                    type="video",
+                    order="viewCount",
+                    publishedAfter=published_after,
+                    maxResults=15,
+                )
                 .execute()
             )
             for item in res.get("items", []):
@@ -179,8 +196,9 @@ def fetch_daily_topic() -> dict:
                         "used_list": used_topics,
                     }
         except Exception as exc:
-            print(f"[WARN] YouTube topic search skipped/failed (using RSS/Evergreen): {exc}")
+            print(f"[WARN] YouTube trending search skipped/failed (using Trends/RSS): {exc}")
 
+    # 2. Fallback to Google Trends India & Everyday Science RSS Feeds
     headers = {"User-Agent": "Mozilla/5.0 (DailyLogicMalayalamBot/1.0)"}
     for feed_url in RSS_FEEDS:
         try:
@@ -198,6 +216,7 @@ def fetch_daily_topic() -> dict:
         except Exception as exc:
             print(f"[WARN] Failed reading feed {feed_url}: {exc}")
 
+    # 3. Fallback to Evergreen bank
     for topic in EVERGREEN_DAILY_TOPICS:
         if topic not in used_topics:
             return {"title": topic, "link": "", "used_list": used_topics}
@@ -218,8 +237,8 @@ def generate_script_plan(topic_title: str, topic_link: str) -> ShortScriptPlan:
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
-You are the host of "Daily Logic Malayalam", a warm, curious Kerala storyteller explaining fascinating everyday facts—ranging from daily-use items, food, human body, nature, animals, vehicles, electronics, and gadgets to common myths.
-Topic Inspiration: {topic_title}
+You are the host of "Daily Logic Malayalam", a warm, curious Kerala storyteller explaining fascinating everyday facts—ranging from daily-use items, food, human body, nature, animals, vehicles, electronics, gadgets, and trending curiosities to common myths.
+Trending Topic Inspiration: {topic_title}
 Reference: {topic_link}
 
 CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
@@ -230,10 +249,11 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
    - Use short sentences with commas (,) so the voiceover naturally pauses and breathes like a human.
 3. Focus on relatable Earth & daily-life topics (NO outer space or galaxies).
 4. Target ~60 seconds (~115 to 145 Malayalam words; up to 2 minutes max if needed).
-5. End naturally before the subscribe line (we automatically append the channel's Malayalam subscribe outro).
+5. End naturally before the follow/subscribe line (we automatically append the branded "Daily Logic Malayalam" follow & subscribe outro).
 6. Keep 'narration_malayalam' strictly to spoken Malayalam script (no [Music], no speaker labels, no asterisks, no English letters).
 7. Provide 'thumbnail_question_ml': a short 3-to-5 word curiosity-sparking Malayalam question that makes viewers want to click immediately.
-8. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
+8. Provide 'reels_caption_ml': a punchy Malayalam/English caption for Instagram & Facebook Reels with 10-12 trending hashtags (#DailyLogicMalayalam #MalayalamReels #KeralaReels #MalayalamFacts #FactCheckMalayalam).
+9. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
 """
 
     last_err = None
@@ -251,7 +271,7 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
             )
             plan = ShortScriptPlan.model_validate_json(response.text)
             narration = plan.narration_malayalam.strip()
-            if "സബ്സ്ക്രൈബ് ചെയ്യൂ" not in narration:
+            if "ഡെയിലി ലോജിക് മലയാളം" not in narration:
                 narration = f"{narration} {MANDATORY_OUTRO_ML}"
             plan.narration_malayalam = narration
             return plan
@@ -342,7 +362,7 @@ def create_voiceover_and_srt(narration: str, audio_path: Path, srt_path: Path) -
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Download Stock Clips (Pixabay / Pexels / FFmpeg Fallback)
+# Step 4: Download Stock Clips
 # ---------------------------------------------------------------------------
 def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
     pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
@@ -425,7 +445,7 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Step 5: Auto-Generate Colorful High-CTR Thumbnail + Fast Video Assembly
+# Step 5: Thumbnail & Fast Video Assembly
 # ---------------------------------------------------------------------------
 def find_malayalam_font() -> str:
     candidates = [
@@ -443,11 +463,6 @@ def find_malayalam_font() -> str:
 def generate_curiosity_thumbnail(
     lead_clip: Path, question_ml: str, out_jpg: Path, out_vertical_png: Path, font_path: str
 ) -> None:
-    """
-    Creates two colorful curiosity thumbnails from the lead stock clip:
-      1) 1280x720 JPEG (for YouTube `thumbnails.set` API)
-      2) 1080x1920 PNG (used as a 0.6s opening hook frame for Shorts feeds)
-    """
     raw_frame = out_jpg.parent / "thumb_raw_frame.jpg"
     subprocess.run(
         [
@@ -471,7 +486,6 @@ def generate_curiosity_thumbnail(
     base = ImageEnhance.Contrast(base).enhance(1.15)
 
     def build_card(target_w: int, target_h: int, is_vertical: bool) -> Image.Image:
-        # Scale & center-crop frame to target canvas
         src_w, src_h = base.size
         scale = max(target_w / src_w, target_h / src_h)
         resized = base.resize((int(src_w * scale), int(src_h * scale)), Image.Resampling.LANCZOS)
@@ -479,7 +493,6 @@ def generate_curiosity_thumbnail(
         top = (resized.height - target_h) // 2
         canvas = resized.crop((left, top, left + target_w, top + target_h))
 
-        # Dark gradient scrim at bottom/center for crisp text pop
         overlay = Image.new("RGBA", (target_w, target_h), (10, 16, 32, 95))
         draw_ov = ImageDraw.Draw(overlay)
         band_y0 = int(target_h * (0.48 if is_vertical else 0.36))
@@ -487,7 +500,6 @@ def generate_curiosity_thumbnail(
         canvas = Image.alpha_composite(canvas, overlay)
 
         draw = ImageDraw.Draw(canvas)
-        # Vibrant border frame
         border_w = 18 if is_vertical else 14
         draw.rectangle(
             [border_w // 2, border_w // 2, target_w - border_w // 2, target_h - border_w // 2],
@@ -495,7 +507,6 @@ def generate_curiosity_thumbnail(
             width=border_w,
         )
 
-        # Top badge pill: "FACT CHECK | സത്യം എന്ത്?"
         badge_font = ImageFont.truetype(font_path, 42 if is_vertical else 34)
         badge_text = "FACT CHECK  |  സത്യം എന്ത്?"
         bx0 = int(target_w * 0.14)
@@ -505,7 +516,6 @@ def generate_curiosity_thumbnail(
         draw.rounded_rectangle([bx0, by0, bx1, by1], radius=44, fill=(255, 61, 46, 255), outline=(255, 255, 255, 255), width=4)
         draw.text((target_w // 2, (by0 + by1) // 2), badge_text, font=badge_font, fill=(255, 255, 255, 255), anchor="mm")
 
-        # Main big curiosity question in bright yellow
         q_font = ImageFont.truetype(font_path, 76 if is_vertical else 66)
         wrapped_q = textwrap.fill(question_ml, width=16 if is_vertical else 22)
         q_y = int(target_h * (0.68 if is_vertical else 0.62))
@@ -528,7 +538,6 @@ def generate_curiosity_thumbnail(
             align="center",
         )
 
-        # Brand pill at bottom
         brand_font = ImageFont.truetype(font_path, 34 if is_vertical else 28)
         draw.text(
             (target_w // 2, int(target_h * 0.90)),
@@ -834,7 +843,6 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) 
     video_id = response["id"]
     print(f"[SUCCESS] Uploaded YouTube Video ({PRIVACY_STATUS})! URL: https://youtube.com/shorts/{video_id}")
 
-    # Attempt to set custom thumbnail via API (supported on standard videos; gracefully skipped if Shorts-restricted)
     try:
         youtube.thumbnails().set(
             videoId=video_id,
@@ -848,25 +856,25 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) 
 
 
 # ---------------------------------------------------------------------------
-# Step 6B & 6C: Optional Meta Reels Cross-Posting
+# Step 6B & 6C: Meta Reels Cross-Posting (Instagram Cover + Hashtags & FB Scheduled)
 # ---------------------------------------------------------------------------
-def upload_to_instagram_reels(video_path: Path, plan: ShortScriptPlan) -> None:
-    access_token = os.getenv("META_ACCESS_TOKEN")
-    ig_user_id = os.getenv("IG_USER_ID")
+def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
+    access_token = os.getenv("META_ACCESS_TOKEN", "").strip()
+    ig_user_id = os.getenv("IG_USER_ID", "").strip()
     if not access_token or not ig_user_id:
         print("[SKIP] Instagram Reels skipped (META_ACCESS_TOKEN or IG_USER_ID not set).")
         return
 
-    caption = f"{plan.title}\n\n{plan.description}"
     file_size = video_path.stat().st_size
-
     init_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media"
+    # thumb_offset="0" uses the colorful 0.6s curiosity thumbnail frame at the start of the video
     init_resp = requests.post(
         init_url,
         data={
             "media_type": "REELS",
             "upload_type": "resumable",
             "caption": caption,
+            "thumb_offset": "0",
             "share_to_feed": "true",
             "access_token": access_token,
         },
@@ -914,19 +922,19 @@ def upload_to_instagram_reels(video_path: Path, plan: ShortScriptPlan) -> None:
         timeout=30,
     )
     pub_resp.raise_for_status()
-    print(f"[SUCCESS] Published Instagram Reel! Media ID: {pub_resp.json().get('id')}")
+    print(f"[SUCCESS] Published Instagram Reel with cover thumbnail & tags! Media ID: {pub_resp.json().get('id')}")
 
 
-def upload_to_facebook_reels(video_path: Path, plan: ShortScriptPlan) -> None:
-    access_token = os.getenv("META_ACCESS_TOKEN")
-    fb_page_id = os.getenv("FB_PAGE_ID")
+def upload_to_facebook_reels(
+    video_path: Path, title: str, description: str, delay_minutes: int = 120
+) -> None:
+    access_token = os.getenv("META_ACCESS_TOKEN", "").strip()
+    fb_page_id = os.getenv("FB_PAGE_ID", "").strip()
     if not access_token or not fb_page_id:
         print("[SKIP] Facebook Reels skipped (META_ACCESS_TOKEN or FB_PAGE_ID not set).")
         return
 
-    description = f"{plan.title}\n\n{plan.description}"
     file_size = video_path.stat().st_size
-
     start_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{fb_page_id}/video_reels"
     start_resp = requests.post(
         start_url,
@@ -953,20 +961,22 @@ def upload_to_facebook_reels(video_path: Path, plan: ShortScriptPlan) -> None:
         )
         up_resp.raise_for_status()
 
-    finish_resp = requests.post(
-        start_url,
-        data={
-            "upload_phase": "finish",
-            "video_id": video_id,
-            "video_state": "PUBLISHED",
-            "description": description,
-            "title": plan.title[:100],
-            "access_token": access_token,
-        },
-        timeout=30,
-    )
+    fb_state = os.getenv("FB_VIDEO_STATE", "SCHEDULED").upper()
+    finish_payload = {
+        "upload_phase": "finish",
+        "video_id": video_id,
+        "video_state": fb_state,
+        "description": description,
+        "title": title[:100],
+        "access_token": access_token,
+    }
+    if fb_state == "SCHEDULED":
+        publish_ts = int((datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)).timestamp())
+        finish_payload["scheduled_publish_time"] = str(publish_ts)
+
+    finish_resp = requests.post(start_url, data=finish_payload, timeout=30)
     finish_resp.raise_for_status()
-    print(f"[SUCCESS] Published Facebook Page Reel! Video ID: {video_id}")
+    print(f"[SUCCESS] Facebook Page Reel ({fb_state}) with tags! Video ID: {video_id}")
 
 
 # ---------------------------------------------------------------------------
@@ -1001,6 +1011,15 @@ def main() -> None:
         generate_refresh_token_interactive()
         return
 
+    if "--publish-ig-only" in sys.argv:
+        final_video_path = WORK_DIR / "final_short.mp4"
+        if not final_video_path.exists() or not META_CACHE_FILE.exists():
+            print("[SKIP] No cached video found for 7:00 PM Instagram Reels publish.")
+            return
+        meta = json.loads(META_CACHE_FILE.read_text(encoding="utf-8"))
+        upload_to_instagram_reels(final_video_path, meta["reels_caption"])
+        return
+
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     audio_path = WORK_DIR / "voiceover.mp3"
     srt_path = WORK_DIR / "captions.srt"
@@ -1008,7 +1027,7 @@ def main() -> None:
     thumb_vertical_png = WORK_DIR / "thumb_vertical.png"
     final_video_path = WORK_DIR / "final_short.mp4"
 
-    print("[1/7] Finding a fresh Everyday Curiosity / Fact-Check topic...")
+    print("[1/7] Finding a trending Everyday Curiosity / Fact-Check topic...")
     topic_info = fetch_daily_topic()
     print(f"      Selected topic: {topic_info['title']}")
 
@@ -1038,6 +1057,14 @@ def main() -> None:
         WORK_DIR,
     )
 
+    reels_caption = f"{plan.title}\n\n{plan.reels_caption_ml}"
+    META_CACHE_FILE.write_text(
+        json.dumps(
+            {"title": plan.title, "reels_caption": reels_caption}, ensure_ascii=False
+        ),
+        encoding="utf-8",
+    )
+
     if SKIP_UPLOAD:
         print("[SKIP] SKIP_UPLOAD=true — Video saved without uploading.")
         return
@@ -1045,22 +1072,16 @@ def main() -> None:
     print(f"[6/7] Uploading video & thumbnail to YouTube as {PRIVACY_STATUS.upper()}...")
     upload_to_youtube(final_video_path, thumb_jpg, plan)
 
-    if PRIVACY_STATUS == "public":
-        print("[7/7] Cross-posting to Instagram Reels & Facebook Page Reels...")
-        try:
-            upload_to_instagram_reels(final_video_path, plan)
-        except Exception as exc:
-            print(f"[WARN] Instagram Reels upload failed: {exc}")
-
-        try:
-            upload_to_facebook_reels(final_video_path, plan)
-        except Exception as exc:
-            print(f"[WARN] Facebook Reels upload failed: {exc}")
-    else:
-        print("[7/7] Meta Reels cross-posting paused while YT_PRIVACY_STATUS is 'private' for review.")
+    print("[7/7] Scheduling Facebook Page Reel for 8:00 PM IST (+120 min)...")
+    try:
+        upload_to_facebook_reels(
+            final_video_path, plan.title, reels_caption, delay_minutes=120
+        )
+    except Exception as exc:
+        print(f"[WARN] Facebook Reels scheduling failed: {exc}")
 
     save_used_topic(topic_info["title"], topic_info["used_list"])
-    print("[DONE] Daily Logic Malayalam draft/video processed successfully.")
+    print("[DONE] 6:00 PM build finished (YouTube Private + Facebook Scheduled for 8:00 PM IST).")
 
 
 if __name__ == "__main__":
