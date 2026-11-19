@@ -2,17 +2,30 @@ name: Daily Logic Malayalam Shorts + Reels Automation
 
 on:
   schedule:
-    # Runs every day at 12:30 UTC (18:00 IST / 6:00 PM Kerala Time)
+    # 12:30 UTC = 6:00 PM IST -> Generate video, upload YouTube (Private), schedule FB Reel (8:00 PM IST)
     - cron: "30 12 * * *"
+    # 13:30 UTC = 7:00 PM IST -> Publish the same video to Instagram Reels
+    - cron: "30 13 * * *"
   workflow_dispatch:
+    inputs:
+      action_mode:
+        description: "Run mode"
+        required: false
+        default: "full_6pm_build"
+        type: choice
+        options:
+          - "full_6pm_build"
+          - "publish_ig_now"
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
-  create-and-publish-daily-video:
+  build-youtube-and-schedule-fb:
+    if: github.event.schedule == '30 12 * * *' || github.event.inputs.action_mode == 'full_6pm_build'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
 
     steps:
       - name: Checkout repository
@@ -34,7 +47,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pillow google-genai edge-tts requests pydantic google-api-python-client google-auth google-auth-oauthlib
 
-      - name: Run Daily Logic Malayalam generator & publisher
+      - name: Run 6:00 PM IST generator (YouTube Private + Facebook Scheduled 8:00 PM IST)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
@@ -44,15 +57,23 @@ jobs:
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           YT_PRIVACY_STATUS: "private"
           TTS_VOICE: "ml-IN-MidhunNeural"
-          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}
-          ELEVENLABS_VOICE_ID: ${{ secrets.ELEVENLABS_VOICE_ID }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          IG_USER_ID: ${{ secrets.IG_USER_ID }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_VIDEO_STATE: "SCHEDULED"
         run: |
           python generate_short.py
 
-      - name: Commit updated topic history (prevents duplicate topics)
+      - name: Cache rendered video for 7:00 PM IST Instagram Reels publish (1-day retention)
+        if: hashFiles('build_short/final_short.mp4') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-ig-reel-handoff
+          path: |
+            build_short/final_short.mp4
+            build_short/meta_payload.json
+          retention-days: 1
+
+      - name: Commit updated topic history
         run: |
           if [ -f used_topics.json ]; then
             git config user.name "github-actions[bot]"
@@ -61,3 +82,39 @@ jobs:
             git diff --staged --quiet || git commit -m "chore: record published Malayalam topic [skip ci]"
             git push
           fi
+
+  publish-instagram-reel-7pm:
+    if: github.event.schedule == '30 13 * * *' || github.event.inputs.action_mode == 'publish_ig_now'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download today's rendered video from latest 6:00 PM IST run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          RUN_ID=$(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=1 --json databaseId -q '.[0].databaseId')
+          if [ -n "$RUN_ID" ]; then
+            mkdir -p build_short
+            gh run download "$RUN_ID" --name daily-ig-reel-handoff --dir build_short
+          fi
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies for Meta Graph API
+        run: |
+          pip install requests pillow google-genai edge-tts pydantic google-api-python-client google-auth google-auth-oauthlib
+
+      - name: Publish to Instagram Reels at 7:00 PM IST
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+        run: |
+          python generate_short.py --publish-ig-only
