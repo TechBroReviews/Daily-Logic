@@ -99,11 +99,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RUN_ID=$(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=1 --json databaseId -q '.[0].databaseId')
-          if [ -n "$RUN_ID" ]; then
-            mkdir -p build_short
-            gh run download "$RUN_ID" --name daily-ig-reel-handoff --dir build_short
-          fi
+          mkdir -p build_short
+          for RID in $(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=10 --json databaseId -q '.[].databaseId'); do
+            if gh run download "$RID" --name daily-ig-reel-handoff --dir build_short 2>/dev/null; then
+              echo "Downloaded daily-ig-reel-handoff from run $RID"
+              break
+            fi
+          done
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
@@ -151,11 +153,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RUN_ID=$(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=1 --json databaseId -q '.[0].databaseId')
-          if [ -n "$RUN_ID" ]; then
-            mkdir -p build_short
-            gh run download "$RUN_ID" --name daily-ig-reel-handoff --dir build_short
-          fi
+          mkdir -p build_short
+          for RID in $(gh run list --workflow="daily_youtube_shorts.yml" --status=success --limit=10 --json databaseId -q '.[].databaseId'); do
+            if gh run download "$RID" --name daily-ig-reel-handoff --dir build_short 2>/dev/null; then
+              echo "Downloaded daily-ig-reel-handoff from run $RID"
+              break
+            fi
+          done
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
