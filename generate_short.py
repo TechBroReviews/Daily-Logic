@@ -868,6 +868,28 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) 
     except Exception as exc:
         print(f"[INFO] Custom thumbnail API skipped (Shorts uses the 0.6s opening hook frame): {exc}")
 
+    try:
+        pls = youtube.playlists().list(part="snippet", mine=True, maxResults=50).execute()
+        pl_id = next(
+            (i["id"] for i in pls.get("items", []) if i["snippet"]["title"].strip().lower() == "daily logic malayalam - shorts"),
+            None,
+        )
+        if not pl_id:
+            pl_id = youtube.playlists().insert(
+                part="snippet,status",
+                body={
+                    "snippet": {"title": "Daily Logic Malayalam - Shorts", "description": "Daily Logic Malayalam Shorts"},
+                    "status": {"privacyStatus": "public"},
+                },
+            ).execute()["id"]
+        youtube.playlistItems().insert(
+            part="snippet",
+            body={"snippet": {"playlistId": pl_id, "resourceId": {"kind": "youtube#video", "videoId": video_id}}},
+        ).execute()
+        print("[SUCCESS] Added Short to playlist: Daily Logic Malayalam - Shorts")
+    except Exception as exc:
+        print(f"[INFO] Shorts playlist skipped (needs youtube or youtube.force-ssl scope): {exc}")
+
     return video_id
 
 
