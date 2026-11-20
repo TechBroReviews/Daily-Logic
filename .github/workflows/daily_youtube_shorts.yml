@@ -70,6 +70,7 @@ jobs:
           name: daily-ig-reel-handoff
           path: |
             build_short/final_short.mp4
+            build_short/thumbnail.jpg
             build_short/meta_payload.json
           retention-days: 1
 
@@ -123,13 +124,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete temp-ig-reel --yes || true
-          gh release create temp-ig-reel build_short/final_short.mp4 --title "Temp IG Reel Handoff" --notes "Temporary 1-minute asset for Instagram Reels ingestion"
+          gh release create temp-ig-reel build_short/final_short.mp4 build_short/thumbnail.jpg --title "Temp IG Reel Handoff" --notes "Temporary 1-minute asset for Instagram Reels ingestion"
 
       - name: Publish to Instagram Reels at 7:00 PM IST
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
           IG_PUBLIC_VIDEO_URL: "https://github.com/${{ github.repository }}/releases/download/temp-ig-reel/final_short.mp4"
+          IG_PUBLIC_THUMB_URL: "https://github.com/${{ github.repository }}/releases/download/temp-ig-reel/thumbnail.jpg"
         run: |
           python generate_short.py --publish-ig-only
 
