@@ -871,18 +871,32 @@ def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
         print("[SKIP] Instagram Reels skipped (META_ACCESS_TOKEN or IG_USER_ID not set).")
         return
 
-    video_bytes = video_path.read_bytes()
-    file_size = len(video_bytes)
     init_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media"
-
     container_id = None
-    for attempt in range(1, 3):
-        # thumb_offset="0" uses the colorful 0.6s curiosity thumbnail frame at the start of the video
+
+    # Primary method: stage MP4 on a 1-hour auto-expiring public URL so Meta fetches via video_url
+    # (avoids Meta's intermittent rupload.facebook.com/ig-api-upload ProcessingFailedError)
+    public_video_url = None
+    try:
+        with open(video_path, "rb") as f:
+            stage_resp = requests.post(
+                "https://litterbox.catbox.moe/resources/internals/api.php",
+                data={"reqtype": "fileupload", "time": "1h"},
+                files={"fileToUpload": ("final_short.mp4", f, "video/mp4")},
+                timeout=120,
+            )
+        if stage_resp.ok and stage_resp.text.strip().startswith("https://"):
+            public_video_url = stage_resp.text.strip()
+            print(f"[INFO] Staged temporary 1h public URL for Instagram ingestion: {public_video_url}")
+    except Exception as exc:
+        print(f"[WARN] Temporary URL staging skipped ({exc}); falling back to resumable upload.")
+
+    if public_video_url:
         init_resp = requests.post(
             init_url,
             data={
                 "media_type": "REELS",
-                "upload_type": "resumable",
+                "video_url": public_video_url,
                 "caption": caption,
                 "thumb_offset": "0",
                 "share_to_feed": "true",
@@ -891,35 +905,55 @@ def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
             timeout=30,
         )
         if not init_resp.ok:
-            print(f"[ERROR] Instagram init HTTP {init_resp.status_code}: {init_resp.text}")
+            print(f"[ERROR] Instagram video_url init HTTP {init_resp.status_code}: {init_resp.text}")
             init_resp.raise_for_status()
-        container_data = init_resp.json()
-        container_id = container_data["id"]
-        upload_uri = container_data.get(
-            "uri", f"https://rupload.facebook.com/ig-api-upload/{GRAPH_API_VERSION}/{container_id}"
-        )
+        container_id = init_resp.json()["id"]
+    else:
+        video_bytes = video_path.read_bytes()
+        file_size = len(video_bytes)
+        for attempt in range(1, 3):
+            init_resp = requests.post(
+                init_url,
+                data={
+                    "media_type": "REELS",
+                    "upload_type": "resumable",
+                    "caption": caption,
+                    "thumb_offset": "0",
+                    "share_to_feed": "true",
+                    "access_token": access_token,
+                },
+                timeout=30,
+            )
+            if not init_resp.ok:
+                print(f"[ERROR] Instagram init HTTP {init_resp.status_code}: {init_resp.text}")
+                init_resp.raise_for_status()
+            container_data = init_resp.json()
+            container_id = container_data["id"]
+            upload_uri = container_data.get(
+                "uri", f"https://rupload.facebook.com/ig-api-upload/{GRAPH_API_VERSION}/{container_id}"
+            )
 
-        rupload_resp = requests.post(
-            upload_uri,
-            headers={
-                "Authorization": f"OAuth {access_token}",
-                "offset": "0",
-                "file_size": str(file_size),
-                "Content-Length": str(file_size),
-                "Content-Type": "application/octet-stream",
-            },
-            data=video_bytes,
-            timeout=180,
-        )
-        if rupload_resp.ok:
-            break
-        print(
-            f"[WARN] Instagram rupload attempt {attempt} failed "
-            f"(HTTP {rupload_resp.status_code}): {rupload_resp.text}"
-        )
-        if attempt == 2:
-            rupload_resp.raise_for_status()
-        time.sleep(5)
+            rupload_resp = requests.post(
+                upload_uri,
+                headers={
+                    "Authorization": f"OAuth {access_token}",
+                    "offset": "0",
+                    "file_size": str(file_size),
+                    "Content-Length": str(file_size),
+                    "Content-Type": "application/octet-stream",
+                },
+                data=video_bytes,
+                timeout=180,
+            )
+            if rupload_resp.ok:
+                break
+            print(
+                f"[WARN] Instagram rupload attempt {attempt} failed "
+                f"(HTTP {rupload_resp.status_code}): {rupload_resp.text}"
+            )
+            if attempt == 2:
+                rupload_resp.raise_for_status()
+            time.sleep(5)
 
     status_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{container_id}"
     for _ in range(20):
