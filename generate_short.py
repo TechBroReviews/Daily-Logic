@@ -738,19 +738,17 @@ def assemble_short_video(
         "-i", str(merged_bg_path),
         "-i", str(audio_path),
         "-i", str(header_png),
-        "-i", str(thumb_vertical_png),
     ]
     filter_parts = [
         "[0:v][2:v]overlay=0:120[vhead]",
-        "[vhead][3:v]overlay=0:0:enable='between(t,0,0.6)'[vhook]",
     ]
-    last_label = "[vhook]"
+    last_label = "[vhead]"
 
     for idx, (start_t, end_t, text) in enumerate(cues):
         png_path = work_dir / f"sub_{idx}.png"
         render_malayalam_subtitle_png(text, png_path, font_path)
         cmd_inputs.extend(["-i", str(png_path)])
-        input_idx = idx + 4
+        input_idx = idx + 3
         out_label = f"[v{idx}]"
         filter_parts.append(
             f"{last_label}[{input_idx}:v]overlay=0:1390:enable='between(t,{start_t:.2f},{end_t:.2f})'{out_label}"
@@ -859,14 +857,33 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) 
     video_id = response["id"]
     print(f"[SUCCESS] Uploaded YouTube Video ({PRIVACY_STATUS})! URL: https://youtube.com/shorts/{video_id}")
 
+    # Wait for YouTube video processing to finish + 10s cooling period before setting custom thumbnail
+    for _ in range(16):
+        try:
+            vinfo = youtube.videos().list(part="processingDetails", id=video_id).execute()
+            pstat = (
+                vinfo.get("items", [{}])[0]
+                .get("processingDetails", {})
+                .get("processingStatus", "")
+            )
+            print(f"[INFO] YouTube Shorts processingStatus: {pstat or 'pending'}")
+            if pstat == "succeeded":
+                time.sleep(10)
+                break
+            if pstat in ("failed", "terminated"):
+                break
+        except Exception:
+            pass
+        time.sleep(15)
+
     try:
         youtube.thumbnails().set(
             videoId=video_id,
             media_body=MediaFileUpload(str(thumb_jpg), mimetype="image/jpeg"),
         ).execute()
-        print("[SUCCESS] Custom curiosity thumbnail uploaded to YouTube!")
+        print("[SUCCESS] Custom curiosity thumbnail uploaded to YouTube Shorts!")
     except Exception as exc:
-        print(f"[INFO] Custom thumbnail API skipped (Shorts uses the 0.6s opening hook frame): {exc}")
+        print(f"[WARN] Custom thumbnail API skipped: {exc}")
 
     try:
         pls = youtube.playlists().list(part="snippet", mine=True, maxResults=50).execute()
@@ -956,18 +973,20 @@ def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
             print(f"[WARN] {host_name} staging failed: {exc}")
 
     if public_video_url:
-        init_resp = requests.post(
-            init_url,
-            data={
-                "media_type": "REELS",
-                "video_url": public_video_url,
-                "caption": caption,
-                "thumb_offset": "0",
-                "share_to_feed": "true",
-                "access_token": access_token,
-            },
-            timeout=30,
-        )
+        ig_payload = {
+            "media_type": "REELS",
+            "video_url": public_video_url,
+            "caption": caption,
+            "share_to_feed": "true",
+            "access_token": access_token,
+        }
+        public_thumb_url = os.getenv("IG_PUBLIC_THUMB_URL", "").strip()
+        if public_thumb_url:
+            ig_payload["cover_url"] = public_thumb_url
+            print(f"[INFO] Using separate Instagram cover_url: {public_thumb_url}")
+        else:
+            ig_payload["thumb_offset"] = "0"
+        init_resp = requests.post(init_url, data=ig_payload, timeout=30)
         if not init_resp.ok:
             print(f"[ERROR] Instagram video_url init HTTP {init_resp.status_code}: {init_resp.text}")
             init_resp.raise_for_status()
@@ -1119,6 +1138,22 @@ def upload_to_facebook_reels(
         print(f"[ERROR] Facebook finish HTTP {finish_resp.status_code}: {finish_resp.text}")
         finish_resp.raise_for_status()
     print(f"[SUCCESS] Facebook Page Reel ({fb_state}) with tags! Video ID: {video_id}")
+    thumb_jpg = WORK_DIR / "thumbnail.jpg"
+    if thumb_jpg.exists():
+        try:
+            with open(thumb_jpg, "rb") as tf:
+                th_resp = requests.post(
+                    f"https://graph.facebook.com/{GRAPH_API_VERSION}/{video_id}/thumbnails",
+                    data={"is_preferred": "true", "access_token": access_token},
+                    files={"source": ("thumbnail.jpg", tf, "image/jpeg")},
+                    timeout=30,
+                )
+            if th_resp.ok:
+                print("[SUCCESS] Separate custom thumbnail attached to Facebook Reel!")
+            else:
+                print(f"[INFO] Facebook Reel thumbnail API skipped (HTTP {th_resp.status_code}): {th_resp.text[:200]}")
+        except Exception as exc:
+            print(f"[INFO] Facebook Reel thumbnail skipped: {exc}")
 
 
 # ---------------------------------------------------------------------------

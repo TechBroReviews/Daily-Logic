@@ -189,8 +189,8 @@ Category for today: {cat_info['label']}
 Focus: {cat_info['prompt_focus']}
 
 STRICT RULES:
-1. Pick ONE engaging, high-retention topic relatable to everyday life in Kerala/India.
-2. NEVER pick outer space, astronomy, astrophysics, black holes, or medical/financial advice.
+1. Pick ONE engaging, high-retention topic relatable to everyday life in Kerala/India (if trending in India recently, great, otherwise pick an evergreen curiosity topic).
+2. Simple, relatable space/moon/planet topics are allowed ONLY if explained in plain, everyday Malayalam that any ordinary person enjoys—avoid heavy astrophysics jargon. Never give medical or financial advice.
 3. NEVER repeat any of these previously covered topics: {used_topics[-40:]}
 4. Use Google Search to verify every scientific fact, number, and mechanism so there are ZERO false claims.
 
@@ -232,7 +232,7 @@ REQUIREMENTS:
 1. Total narration must be ~1,150 to 1,350 Malayalam words across intro + 5 chapters + outro so the video runs 8 to 10 minutes.
 2. Write in natural, warm, conversational Kerala Malayalam (like a knowledgeable friend explaining clearly—not stiff textbook prose).
 3. ONLY state verified facts from the research brief. Do NOT invent statistics, fake studies, or exaggerated claims.
-4. No outer space/astronomy topics.
+4. Keep explanations simple, conversational, and enjoyable for everyday Malayalam listeners (even for space topics, avoid complex jargon).
 5. For each of the 5 chapters, provide 3 short English stock-video search queries (e.g., "induction stove cooking", "ceiling fan spinning", "electric train station").
 6. End outro_narration_ml with: "ഇത്തരം കൗതുകകരവും ശാസ്ത്രീയവുമായ അറിവുകൾക്കായി ഡെയിലി ലോജിക് മലയാളം എന്ന നമ്മുടെ പേജും ചാനലും ഫോളോ ചെയ്യാനും സബ്സ്ക്രൈബ് ചെയ്യാനും മറക്കല്ലേ."
 """
@@ -657,6 +657,25 @@ def upload_long_to_youtube(video_path: Path, thumb_jpg: Path, plan: LongVideoPla
     video_id = response["id"]
     print(f"[SUCCESS] Uploaded Long Video! URL: https://www.youtube.com/watch?v={video_id}")
 
+    # Wait for YouTube processing to finish + 10s cooling period before setting custom thumbnail
+    for _ in range(20):
+        try:
+            vinfo = youtube.videos().list(part="processingDetails", id=video_id).execute()
+            pstat = (
+                vinfo.get("items", [{}])[0]
+                .get("processingDetails", {})
+                .get("processingStatus", "")
+            )
+            print(f"[INFO] YouTube processingStatus: {pstat or 'pending'}")
+            if pstat == "succeeded":
+                time.sleep(10)
+                break
+            if pstat in ("failed", "terminated"):
+                break
+        except Exception:
+            pass
+        time.sleep(15)
+
     try:
         youtube.thumbnails().set(
             videoId=video_id, media_body=MediaFileUpload(str(thumb_jpg), mimetype="image/jpeg")
@@ -691,17 +710,75 @@ def upload_long_to_facebook(video_path: Path, title: str, description: str) -> N
         pass
 
     url = f"https://graph-video.facebook.com/{GRAPH_API_VERSION}/{fb_page_id}/videos"
+    file_size = video_path.stat().st_size
+    print(f"[INFO] Starting Facebook chunked upload ({file_size / (1024 * 1024):.1f} MB)...")
+
+    # Phase 1: Start chunked upload session
+    start_resp = requests.post(
+        url,
+        data={"upload_phase": "start", "file_size": str(file_size), "access_token": access_token},
+        timeout=30,
+    )
+    if not start_resp.ok:
+        print(f"[ERROR] Facebook start HTTP {start_resp.status_code}: {start_resp.text}")
+        start_resp.raise_for_status()
+    sdata = start_resp.json()
+    session_id = sdata["upload_session_id"]
+    video_id = sdata["video_id"]
+    start_offset = int(sdata["start_offset"])
+    end_offset = int(sdata["end_offset"])
+
+    # Phase 2: Transfer chunks
     with open(video_path, "rb") as f:
-        resp = requests.post(
-            url,
-            data={"title": title[:100], "description": description[:4000], "access_token": access_token},
-            files={"source": ("long_video.mp4", f, "video/mp4")},
-            timeout=300,
-        )
-    if not resp.ok:
-        print(f"[ERROR] Facebook Video HTTP {resp.status_code}: {resp.text}")
-        resp.raise_for_status()
-    print(f"[SUCCESS] Published Long Video to Facebook Page! Video ID: {resp.json().get('id')}")
+        while start_offset < file_size:
+            f.seek(start_offset)
+            chunk_len = max(1, end_offset - start_offset)
+            chunk = f.read(chunk_len)
+            if not chunk:
+                break
+            tr_resp = requests.post(
+                url,
+                data={
+                    "upload_phase": "transfer",
+                    "upload_session_id": session_id,
+                    "start_offset": str(start_offset),
+                    "access_token": access_token,
+                },
+                files={"video_file_chunk": ("chunk.mp4", chunk, "application/octet-stream")},
+                timeout=180,
+            )
+            if not tr_resp.ok:
+                print(f"[ERROR] Facebook transfer HTTP {tr_resp.status_code}: {tr_resp.text}")
+                tr_resp.raise_for_status()
+            tdata = tr_resp.json()
+            start_offset = int(tdata["start_offset"])
+            end_offset = int(tdata["end_offset"])
+            print(f"[INFO] Facebook upload progress: {min(100, int(start_offset * 100 / file_size))}%")
+
+    # Phase 3: Finish + attach separate 16:9 thumbnail if available
+    finish_data = {
+        "upload_phase": "finish",
+        "upload_session_id": session_id,
+        "title": title[:100],
+        "description": description[:4000],
+        "access_token": access_token,
+    }
+    thumb_path = WORK_DIR / "long_thumb.jpg"
+    if thumb_path.exists():
+        with open(thumb_path, "rb") as tf:
+            fin_resp = requests.post(
+                url,
+                data=finish_data,
+                files={"thumb": ("long_thumb.jpg", tf, "image/jpeg")},
+                timeout=60,
+            )
+    else:
+        fin_resp = requests.post(url, data=finish_data, timeout=60)
+
+    if not fin_resp.ok:
+        print(f"[ERROR] Facebook finish HTTP {fin_resp.status_code}: {fin_resp.text}")
+        fin_resp.raise_for_status()
+    print(f"[SUCCESS] Published Long Video + Thumbnail to Facebook Page! Video ID: {video_id}")
 
 
 def main() -> None:
