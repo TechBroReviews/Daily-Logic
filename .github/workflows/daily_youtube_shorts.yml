@@ -115,12 +115,28 @@ jobs:
         run: |
           pip install requests pillow google-genai edge-tts pydantic google-api-python-client google-auth google-auth-oauthlib
 
+      - name: Stage MP4 via temporary GitHub Release for Instagram Reels
+        if: hashFiles('build_short/final_short.mp4') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete temp-ig-reel --yes || true
+          gh release create temp-ig-reel build_short/final_short.mp4 --title "Temp IG Reel Handoff" --notes "Temporary 1-minute asset for Instagram Reels ingestion"
+
       - name: Publish to Instagram Reels at 7:00 PM IST
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_PUBLIC_VIDEO_URL: "https://github.com/${{ github.repository }}/releases/download/temp-ig-reel/final_short.mp4"
         run: |
           python generate_short.py --publish-ig-only
+
+      - name: Clean up temporary GitHub Release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete temp-ig-reel --yes --cleanup-tag || true
 
   publish-facebook-reel-8pm:
     if: github.event.schedule == '30 14 * * *' || github.event.inputs.action_mode == 'publish_fb_now'
