@@ -452,7 +452,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
             "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(intro_clip), "-i", str(intro_mp3),
             "-t", f"{intro_dur:.2f}", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
+            "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
         ],
         check=True,
     )
@@ -475,7 +475,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
                 "ffmpeg", "-y", "-loop", "1", "-i", str(card_png),
                 "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
                 "-t", "2.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
-                "-c:a", "aac", "-ar", "44100", "-b:a", "192k", "-shortest", str(card_mp4),
+                "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(card_mp4),
             ],
             check=True,
         )
@@ -526,7 +526,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
                 "-filter_complex", "[0:v][2:v]overlay=0:0[vout]",
                 "-map", "[vout]", "-map", "1:a:0",
                 "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-                "-c:a", "aac", "-ar", "44100", "-b:a", "192k", "-shortest", str(ch_seg),
+                "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(ch_seg),
             ],
             check=True,
         )
@@ -542,7 +542,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
             "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(intro_clip), "-i", str(outro_mp3),
             "-t", f"{outro_dur:.2f}", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg),
+            "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg),
         ],
         check=True,
     )
@@ -555,7 +555,8 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     subprocess.run(
         [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(full_concat),
-            "-c", "copy", "-movflags", "+faststart", str(final_mp4),
+            "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k",
+            "-movflags", "+faststart", str(final_mp4),
         ],
         check=True,
     )
