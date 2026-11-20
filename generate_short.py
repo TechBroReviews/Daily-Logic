@@ -811,6 +811,20 @@ def assemble_short_video(
 def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) -> str:
     youtube = get_youtube_service()
 
+    status_obj = {
+        "privacyStatus": PRIVACY_STATUS,
+        "selfDeclaredMadeForKids": False,
+        "containsSyntheticMedia": False,
+    }
+    if PRIVACY_STATUS == "private":
+        # Schedule auto-publish at 7:00 PM IST (13:30 UTC) if run before 6:50 PM IST, else +60 min
+        ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+        target_ist = ist_now.replace(hour=19, minute=0, second=0, microsecond=0)
+        if ist_now >= target_ist - timedelta(minutes=10):
+            target_ist = ist_now + timedelta(minutes=60)
+        status_obj["publishAt"] = target_ist.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        print(f"[INFO] YouTube scheduled for auto-publish at {status_obj['publishAt']} (7:00 PM IST).")
+
     body = {
         "snippet": {
             "title": plan.title[:100],
@@ -820,11 +834,7 @@ def upload_to_youtube(video_path: Path, thumb_jpg: Path, plan: ShortScriptPlan) 
             "defaultLanguage": "ml",
             "defaultAudioLanguage": "ml",
         },
-        "status": {
-            "privacyStatus": PRIVACY_STATUS,
-            "selfDeclaredMadeForKids": False,
-            "containsSyntheticMedia": False,
-        },
+        "status": status_obj,
     }
 
     media = MediaFileUpload(
@@ -874,15 +884,17 @@ def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
     init_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{ig_user_id}/media"
     container_id = None
 
-    # Primary method: stage MP4 on a 1-hour auto-expiring public URL so Meta fetches via video_url
+    # Primary method: use GitHub Release public URL if provided, else stage on temporary URL
     # (avoids Meta's intermittent rupload.facebook.com/ig-api-upload ProcessingFailedError)
-    public_video_url = None
+    public_video_url = os.getenv("IG_PUBLIC_VIDEO_URL", "").strip() or None
+    if public_video_url:
+        print(f"[INFO] Using GitHub Release public URL for Instagram: {public_video_url}")
     staging_hosts = [
         ("tmpfiles.org", "https://tmpfiles.org/api/v1/upload"),
         ("litterbox.catbox.moe", "https://litterbox.catbox.moe/resources/internals/api.php"),
         ("0x0.st", "https://0x0.st"),
     ]
-    for host_name, host_url in staging_hosts:
+    for host_name, host_url in ([] if public_video_url else staging_hosts):
         try:
             with open(video_path, "rb") as f:
                 if host_name == "tmpfiles.org":
@@ -1019,6 +1031,21 @@ def upload_to_facebook_reels(
         print("[SKIP] Facebook Reels skipped (META_ACCESS_TOKEN or FB_PAGE_ID not set).")
         return
 
+    # If META_ACCESS_TOKEN is a User Token, automatically exchange it for the Page Access Token
+    page_token = access_token
+    try:
+        pt_resp = requests.get(
+            f"https://graph.facebook.com/{GRAPH_API_VERSION}/{fb_page_id}",
+            params={"fields": "access_token", "access_token": access_token},
+            timeout=20,
+        )
+        if pt_resp.ok and pt_resp.json().get("access_token"):
+            page_token = pt_resp.json()["access_token"]
+            print("[INFO] Resolved Page Access Token for Facebook Reels.")
+    except Exception as exc:
+        print(f"[WARN] Page token lookup skipped ({exc}); using META_ACCESS_TOKEN directly.")
+
+    access_token = page_token
     video_bytes = video_path.read_bytes()
     file_size = len(video_bytes)
     start_url = f"https://graph.facebook.com/{GRAPH_API_VERSION}/{fb_page_id}/video_reels"
