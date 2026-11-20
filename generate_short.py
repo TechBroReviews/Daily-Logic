@@ -877,19 +877,49 @@ def upload_to_instagram_reels(video_path: Path, caption: str) -> None:
     # Primary method: stage MP4 on a 1-hour auto-expiring public URL so Meta fetches via video_url
     # (avoids Meta's intermittent rupload.facebook.com/ig-api-upload ProcessingFailedError)
     public_video_url = None
-    try:
-        with open(video_path, "rb") as f:
-            stage_resp = requests.post(
-                "https://litterbox.catbox.moe/resources/internals/api.php",
-                data={"reqtype": "fileupload", "time": "1h"},
-                files={"fileToUpload": ("final_short.mp4", f, "video/mp4")},
-                timeout=120,
-            )
-        if stage_resp.ok and stage_resp.text.strip().startswith("https://"):
-            public_video_url = stage_resp.text.strip()
-            print(f"[INFO] Staged temporary 1h public URL for Instagram ingestion: {public_video_url}")
-    except Exception as exc:
-        print(f"[WARN] Temporary URL staging skipped ({exc}); falling back to resumable upload.")
+    staging_hosts = [
+        ("tmpfiles.org", "https://tmpfiles.org/api/v1/upload"),
+        ("litterbox.catbox.moe", "https://litterbox.catbox.moe/resources/internals/api.php"),
+        ("0x0.st", "https://0x0.st"),
+    ]
+    for host_name, host_url in staging_hosts:
+        try:
+            with open(video_path, "rb") as f:
+                if host_name == "tmpfiles.org":
+                    resp = requests.post(
+                        host_url,
+                        files={"file": ("final_short.mp4", f, "video/mp4")},
+                        timeout=120,
+                    )
+                    if resp.ok:
+                        raw_url = resp.json().get("data", {}).get("url", "")
+                        if raw_url:
+                            raw_url = raw_url.replace("http://", "https://", 1)
+                            public_video_url = raw_url.replace("tmpfiles.org/", "tmpfiles.org/dl/", 1)
+                elif host_name == "litterbox.catbox.moe":
+                    resp = requests.post(
+                        host_url,
+                        data={"reqtype": "fileupload", "time": "1h"},
+                        files={"fileToUpload": ("final_short.mp4", f, "video/mp4")},
+                        timeout=120,
+                    )
+                    if resp.ok and resp.text.strip().startswith("https://"):
+                        public_video_url = resp.text.strip()
+                else:
+                    resp = requests.post(
+                        host_url,
+                        headers={"User-Agent": "DailyLogicBot/1.0"},
+                        files={"file": ("final_short.mp4", f, "video/mp4")},
+                        timeout=120,
+                    )
+                    if resp.ok and resp.text.strip().startswith("https://"):
+                        public_video_url = resp.text.strip()
+            if public_video_url:
+                print(f"[INFO] Staged temporary public URL via {host_name}: {public_video_url}")
+                break
+            print(f"[WARN] {host_name} returned HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as exc:
+            print(f"[WARN] {host_name} staging failed: {exc}")
 
     if public_video_url:
         init_resp = requests.post(
