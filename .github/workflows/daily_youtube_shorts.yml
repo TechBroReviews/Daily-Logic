@@ -2,12 +2,12 @@ name: Daily Logic Malayalam Shorts + Reels Automation
 
 on:
   schedule:
-    # 12:30 UTC = 6:00 PM IST -> Generate video, upload YouTube (Private), cache for IG & FB
-    - cron: "30 12 * * *"
-    # 13:30 UTC = 7:00 PM IST -> Publish the same video to Instagram Reels
-    - cron: "30 13 * * *"
-    # 14:30 UTC = 8:00 PM IST -> Publish the same video to Facebook Page Reels
-    - cron: "30 14 * * *"
+    # 12:17 UTC = 5:47 PM IST (off-:30 slot) -> Generate video, upload YouTube (Private -> 7:00 PM IST), cache for IG & FB
+    - cron: "17 12 * * *"
+    # 13:37 UTC = 7:07 PM IST (off-:30 slot) -> Publish the same video to Instagram Reels
+    - cron: "37 13 * * *"
+    # 14:37 UTC = 8:07 PM IST (off-:30 slot) -> Publish the same video to Facebook Page Reels
+    - cron: "37 14 * * *"
   workflow_dispatch:
     inputs:
       action_mode:
@@ -26,7 +26,7 @@ permissions:
 
 jobs:
   build-youtube-6pm:
-    if: github.event.schedule == '30 12 * * *' || github.event.inputs.action_mode == 'full_6pm_build'
+    if: github.event.schedule == '17 12 * * *' || github.event.inputs.action_mode == 'full_6pm_build'
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
@@ -88,7 +88,7 @@ jobs:
           fi
 
   publish-instagram-reel-7pm:
-    if: github.event.schedule == '30 13 * * *' || github.event.inputs.action_mode == 'publish_ig_now'
+    if: github.event.schedule == '37 13 * * *' || github.event.inputs.action_mode == 'publish_ig_now'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -143,7 +143,7 @@ jobs:
           gh release delete temp-ig-reel --yes --cleanup-tag || true
 
   publish-facebook-reel-8pm:
-    if: github.event.schedule == '30 14 * * *' || github.event.inputs.action_mode == 'publish_fb_now'
+    if: github.event.schedule == '37 14 * * *' || github.event.inputs.action_mode == 'publish_fb_now'
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
