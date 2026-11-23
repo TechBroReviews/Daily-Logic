@@ -104,7 +104,8 @@ class ChapterPlan(BaseModel):
 
 class LongVideoPlan(BaseModel):
     title: str = Field(description="Catchy Malayalam YouTube title (max 85 chars) with 1 relevant emoji")
-    thumbnail_hook_ml: str = Field(description="Bold 3-5 word Malayalam hook question for 16:9 thumbnail")
+    thumbnail_hook_ml: str = Field(description="Bold 3-5 word Malayalam curiosity dialogue/hook for 16:9 thumbnail")
+    thumbnail_image_query: str = Field(description="2-3 concrete English words for the main subject photo on Pixabay (e.g. 'denim jeans pocket', 'airplane window').")
     intro_narration_ml: str = Field(
         description="70-90 words of engaging Malayalam intro hook previewing what viewers will learn."
     )
@@ -318,68 +319,174 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont
 def render_chapter_card(chapter_num: int, title_ml: str, out_png: Path, font_path: str) -> None:
     img = Image.new("RGB", (1920, 1080), (14, 24, 48))
     draw = ImageDraw.Draw(img)
-    # Subtle accent bar
-    draw.rectangle([140, 420, 165, 660], fill=(250, 204, 21))
+    draw.rectangle([140, 400, 165, 680], fill=(250, 204, 21))
     f_label = ImageFont.truetype(font_path, 44)
-    f_title = ImageFont.truetype(font_path, 76)
-    draw.text((200, 425), f"CHAPTER {chapter_num}", font=f_label, fill=(250, 204, 21))
+    f_title = ImageFont.truetype(font_path, 72)
+    draw.text((200, 410), f"ഭാഗം {chapter_num}", font=f_label, fill=(250, 204, 21))
     lines = wrap_text(draw, title_ml, f_title, 1520)[:2]
-    y = 500
+    y = 490
     for ln in lines:
         draw.text((200, y), ln, font=f_title, fill=(255, 255, 255))
         y += 95
     f_brand = ImageFont.truetype(font_path, 32)
-    draw.text((200, 960), WATERMARK_TEXT, font=f_brand, fill=(148, 163, 184))
+    draw.text((200, 960), "ഡെയിലി ലോജിക് മലയാളം", font=f_brand, fill=(148, 163, 184))
     img.save(out_png)
 
 
 def render_callout_overlay(chapter: ChapterPlan, out_png: Path, font_path: str) -> None:
-    """Transparent 1920x1080 PNG overlay with a clean lower-third fact/myth-vs-fact card."""
+    """Transparent 1920x1080 PNG overlay with wrapped Malayalam text that never overflows its box."""
     img = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    draw.rounded_rectangle([80, 810, 1840, 1020], radius=24, fill=(10, 18, 36, 215), outline=(250, 204, 21, 220), width=3)
-    f_head = ImageFont.truetype(font_path, 32)
-    f_body = ImageFont.truetype(font_path, 42)
+    f_head = ImageFont.truetype(font_path, 34)
+    f_body = ImageFont.truetype(font_path, 38)
+    max_text_w = 1640
+
     if chapter.myth_label_ml and chapter.fact_label_ml:
-        draw.text((120, 832), f"MYTH: {chapter.myth_label_ml[:75]}", font=f_head, fill=(248, 113, 113))
-        draw.text((120, 892), f"FACT: {chapter.fact_label_ml[:85]}", font=f_body, fill=(74, 222, 128))
+        myth_lines = wrap_text(draw, f"മിഥ്യ: {chapter.myth_label_ml}", f_head, max_text_w)[:2]
+        fact_lines = wrap_text(draw, f"സത്യം: {chapter.fact_label_ml}", f_body, max_text_w)[:2]
+        total_lines = len(myth_lines) + len(fact_lines)
+        box_h = 48 + total_lines * 52
+        y0 = max(720, 1030 - box_h)
+        y1 = 1030
+        draw.rounded_rectangle([80, y0, 1840, y1], radius=24, fill=(10, 18, 36, 225), outline=(250, 204, 21, 235), width=4)
+        cur_y = y0 + 24
+        for ln in myth_lines:
+            draw.text((120, cur_y), ln, font=f_head, fill=(248, 113, 113))
+            cur_y += 48
+        cur_y += 6
+        for ln in fact_lines:
+            draw.text((120, cur_y), ln, font=f_body, fill=(74, 222, 128))
+            cur_y += 52
     else:
-        draw.text((120, 830), "KEY FACT", font=f_head, fill=(250, 204, 21))
-        lines = wrap_text(draw, chapter.key_fact_ml, f_body, 1660)[:2]
-        y = 882
-        for ln in lines:
-            draw.text((120, y), ln, font=f_body, fill=(255, 255, 255))
-            y += 56
+        fact_lines = wrap_text(draw, chapter.key_fact_ml, f_body, max_text_w)[:2]
+        box_h = 84 + len(fact_lines) * 54
+        y0 = max(750, 1030 - box_h)
+        y1 = 1030
+        draw.rounded_rectangle([80, y0, 1840, y1], radius=24, fill=(10, 18, 36, 225), outline=(250, 204, 21, 235), width=4)
+        draw.text((120, y0 + 22), "പ്രധാന കാര്യം", font=f_head, fill=(250, 204, 21))
+        cur_y = y0 + 72
+        for ln in fact_lines:
+            draw.text((120, cur_y), ln, font=f_body, fill=(255, 255, 255))
+            cur_y += 54
     img.save(out_png)
 
 
-def render_thumbnail_16x9(clip_path: Path, hook_ml: str, out_jpg: Path, font_path: str) -> None:
-    frame_png = WORK_DIR / "thumb_frame.png"
-    subprocess.run(
-        ["ffmpeg", "-y", "-ss", "1.0", "-i", str(clip_path), "-vframes", "1", str(frame_png)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+
+def generate_gemini_topic_image(subject_query: str, aspect_ratio: str, out_jpg: Path) -> bool:
+    """Generates a custom colorful topic image via Gemini Paid API, with automatic fallback if Free Tier."""
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key or not subject_query.strip():
+        return False
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        f"Vibrant, ultra-colorful, high-contrast YouTube thumbnail visual illustrating: {subject_query}. "
+        "Dramatic studio lighting, eye-catching composition, curiosity-sparking focal subject on the right/center, "
+        "clean dark-blue space on the left for text. Strictly NO text, NO words, NO letters, NO watermarks."
     )
-    bg = Image.open(frame_png).convert("RGB").resize((1280, 720))
-    overlay = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+    for img_model in ("gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"):
+        try:
+            resp = client.models.generate_content(
+                model=img_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+                ),
+            )
+            for cand in getattr(resp, "candidates", []) or []:
+                for part in getattr(cand.content, "parts", []) or []:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        out_jpg.write_bytes(inline.data)
+                        print(f"[SUCCESS] Generated custom AI thumbnail image via {img_model}!")
+                        return True
+        except Exception as exc:
+            print(f"[INFO] Gemini image gen ({img_model}) skipped (needs AI Studio Paid Tier): {exc}")
+    return False
+
+
+def fetch_topic_image_from_pixabay(query: str, out_jpg: Path) -> bool:
+    """Fetches a high-res topic-specific photo/illustration from Pixabay Images API."""
+    if not PIXABAY_API_KEY or not query.strip():
+        return False
+    try:
+        r = requests.get(
+            "https://pixabay.com/api/",
+            params={
+                "key": PIXABAY_API_KEY,
+                "q": query.strip(),
+                "image_type": "all",
+                "orientation": "horizontal",
+                "per_page": 5,
+                "safesearch": "true",
+            },
+            timeout=20,
+        )
+        hits = r.json().get("hits", [])
+        for h in hits:
+            url = h.get("largeImageURL") or h.get("webformatURL")
+            if url:
+                out_jpg.write_bytes(requests.get(url, timeout=30).content)
+                return True
+    except Exception as exc:
+        print(f"[WARN] Pixabay image lookup failed for '{query}': {exc}")
+    return False
+
+
+def render_thumbnail_16x9(clip_path: Path, hook_ml: str, out_jpg: Path, font_path: str, thumb_query: str = "") -> None:
+    """Creates a vibrant, Canva-style topic-specific 1280x720 thumbnail using a dedicated topic photo."""
+    from PIL import ImageEnhance
+    subject_jpg = WORK_DIR / "thumb_subject.jpg"
+    got_topic_img = generate_gemini_topic_image(thumb_query, "16:9", subject_jpg) or fetch_topic_image_from_pixabay(thumb_query, subject_jpg)
+    if not got_topic_img:
+        subprocess.run(
+            ["ffmpeg", "-y", "-ss", "1.5", "-i", str(clip_path), "-vframes", "1", str(subject_jpg)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    src_img = Image.open(subject_jpg).convert("RGB")
+    src_img = ImageEnhance.Color(src_img).enhance(1.45)
+    src_img = ImageEnhance.Contrast(src_img).enhance(1.22)
+
+    W, H = 1280, 720
+    scale = max(W / src_img.width, H / src_img.height)
+    resized = src_img.resize((int(src_img.width * scale), int(src_img.height * scale)), Image.Resampling.LANCZOS)
+    left = (resized.width - W) // 2
+    top = (resized.height - H) // 2
+    bg = resized.crop((left, top, left + W, top + H)).convert("RGBA")
+
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     odraw = ImageDraw.Draw(overlay)
-    odraw.rectangle([0, 0, 1280, 720], fill=(10, 15, 35, 110))
-    odraw.rounded_rectangle([55, 420, 1225, 675], radius=24, fill=(15, 23, 42, 225), outline=(250, 204, 21, 255), width=5)
-    bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(bg)
-    f_hook = ImageFont.truetype(font_path, 62)
-    lines = wrap_text(draw, hook_ml, f_hook, 1100)[:2]
-    y = 455
+    for x in range(W):
+        alpha = int(235 * max(0.25, 1.0 - (x / (W * 0.88))))
+        odraw.line([(x, 0), (x, H)], fill=(12, 18, 46, alpha))
+    odraw.rectangle([0, 440, W, H], fill=(10, 14, 38, 175))
+    canvas = Image.alpha_composite(bg, overlay).convert("RGB")
+    draw = ImageDraw.Draw(canvas)
+
+    draw.rectangle([8, 8, W - 9, H - 9], outline=(255, 214, 0), width=12)
+
+    f_badge = ImageFont.truetype(font_path, 38)
+    draw.rounded_rectangle([48, 42, 470, 118], radius=36, fill=(239, 68, 68), outline=(255, 255, 255), width=4)
+    draw.text((259, 80), "ഇതിന്റെ രഹസ്യം എന്ത്?", font=f_badge, fill=(255, 255, 255), anchor="mm")
+
+    f_hook = ImageFont.truetype(font_path, 66)
+    lines = wrap_text(draw, hook_ml, f_hook, 820)[:3]
+    y = 220 if len(lines) == 3 else 270
     for ln in lines:
-        draw.text((90, y), ln, font=f_hook, fill=(250, 204, 21))
-        y += 82
-    bg.save(out_jpg, quality=95)
+        draw.text((54, y + 5), ln, font=f_hook, fill=(0, 0, 0))
+        draw.text((50, y), ln, font=f_hook, fill=(255, 235, 59))
+        y += 92
+
+    f_brand = ImageFont.truetype(font_path, 30)
+    draw.rounded_rectangle([48, 616, 460, 672], radius=24, fill=(0, 180, 216))
+    draw.text((254, 644), "ഡെയിലി ലോജിക് മലയാളം", font=f_brand, fill=(255, 255, 255), anchor="mm")
+
+    canvas.save(out_jpg, quality=95)
 
 
-# ---------------------------------------------------------------------------
-# Step 3: Audio + Stock Clips + FFmpeg 1920x1080 Assembly
-# ---------------------------------------------------------------------------
 def tts_to_mp3(text: str, out_mp3: Path) -> float:
     subprocess.run(
         [
@@ -429,7 +536,24 @@ def fetch_landscape_clip(query: str, out_mp4: Path) -> bool:
                 out_mp4.write_bytes(vid_data)
                 return True
     except Exception as exc:
-        print(f"[WARN] Pixabay lookup failed for '{query}': {exc}")
+        print(f"[WARN] Pixabay video lookup failed for '{query}': {exc}")
+
+    photo_tmp = out_mp4.with_suffix(".jpg")
+    if fetch_topic_image_from_pixabay(query, photo_tmp):
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-loop", "1", "-i", str(photo_tmp),
+                    "-vf", "scale=2160:1215:force_original_aspect_ratio=increase,crop=2160:1215,zoompan=z='min(zoom+0.0012,1.15)':d=240:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,fps=30,format=yuv420p",
+                    "-t", "8", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(out_mp4),
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return True
+        except Exception as exc:
+            print(f"[WARN] Ken Burns photo fallback failed for '{query}': {exc}")
     return False
 
 
@@ -562,7 +686,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     )
 
     thumb_jpg = WORK_DIR / "long_thumb.jpg"
-    render_thumbnail_16x9(first_clip_for_thumb, plan.thumbnail_hook_ml, thumb_jpg, font_path)
+    render_thumbnail_16x9(first_clip_for_thumb, plan.thumbnail_hook_ml, thumb_jpg, font_path, plan.thumbnail_image_query)
     chapters_text = "Chapters:\n00:00 Intro\n" + "\n".join(chapter_timestamps)
     return final_mp4, thumb_jpg, chapters_text
 

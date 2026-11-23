@@ -18,7 +18,10 @@ import re
 import subprocess
 import sys
 import textwrap
+import math
+import struct
 import time
+import wave
 import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
@@ -104,7 +107,10 @@ class ShortScriptPlan(BaseModel):
         description="Short 4-to-7 word Malayalam headline shown at the top of the video frame."
     )
     thumbnail_question_ml: str = Field(
-        description="Punchy 3-to-5 word curiosity-sparking Malayalam question for the thumbnail (ending with '?' or '!')."
+        description="Punchy 3-to-5 word curiosity-sparking Malayalam dialogue/question for the thumbnail (ending with '?' or '!')."
+    )
+    thumbnail_image_query: str = Field(
+        description="2-3 concrete English words for the exact main subject photo on Pixabay (e.g. 'denim jeans pocket', 'mosquito skin', 'car brake')."
     )
     description: str = Field(
         description="Engaging Malayalam & English YouTube description explaining the fact or curiosity, plus 5-8 YouTube hashtags."
@@ -117,6 +123,9 @@ class ShortScriptPlan(BaseModel):
     )
     narration_malayalam: str = Field(
         description="Natural, conversational spoken Kerala Malayalam script (115 to 145 words for ~60 seconds). Use short sentences and commas for natural human pauses. Spoken style only—no textbook stiffness, no stage directions, no markdown."
+    )
+    key_points_ml: List[str] = Field(
+        description="Exactly 2 short, punchy Malayalam fact/takeaway lines (6 to 10 words each) for 2D animated explainer cards."
     )
     search_queries: List[str] = Field(
         description="Exactly 4 concise 1-to-2 word ENGLISH visual search terms for stock videos matching the story."
@@ -254,6 +263,7 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
 7. Provide 'thumbnail_question_ml': a short 3-to-5 word curiosity-sparking Malayalam question that makes viewers want to click immediately.
 8. Provide 'reels_caption_ml': a punchy Malayalam/English caption for Instagram & Facebook Reels with 10-12 trending hashtags (#DailyLogicMalayalam #MalayalamReels #KeralaReels #MalayalamFacts #FactCheckMalayalam).
 9. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
+10. Provide 'key_points_ml': exactly 2 short, punchy Malayalam takeaway lines (6-10 words each) to display on 2D animated explainer cards.
 """
 
     last_err = None
@@ -460,26 +470,81 @@ def find_malayalam_font() -> str:
     return "DejaVuSans-Bold.ttf"
 
 
+
+def generate_gemini_topic_image(subject_query: str, aspect_ratio: str, out_jpg: Path) -> bool:
+    """Generates a custom colorful topic image via Gemini Paid API, with automatic fallback if Free Tier."""
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    if not api_key or not subject_query.strip():
+        return False
+    client = genai.Client(api_key=api_key)
+    prompt = (
+        f"Vibrant, ultra-colorful, high-contrast YouTube thumbnail visual illustrating: {subject_query}. "
+        "Dramatic studio lighting, eye-catching composition, curiosity-sparking focal subject on the right/center, "
+        "clean dark-blue space on the left for text. Strictly NO text, NO words, NO letters, NO watermarks."
+    )
+    for img_model in ("gemini-3.1-flash-lite-image", "gemini-2.5-flash-image"):
+        try:
+            resp = client.models.generate_content(
+                model=img_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_modalities=["IMAGE"],
+                    image_config=types.ImageConfig(aspect_ratio=aspect_ratio),
+                ),
+            )
+            for cand in getattr(resp, "candidates", []) or []:
+                for part in getattr(cand.content, "parts", []) or []:
+                    inline = getattr(part, "inline_data", None)
+                    if inline and getattr(inline, "data", None):
+                        out_jpg.write_bytes(inline.data)
+                        print(f"[SUCCESS] Generated custom AI thumbnail image via {img_model}!")
+                        return True
+        except Exception as exc:
+            print(f"[INFO] Gemini image gen ({img_model}) skipped (needs AI Studio Paid Tier): {exc}")
+    return False
+
+
+def fetch_short_topic_image(query: str, out_jpg: Path) -> bool:
+    pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
+    if not pixabay_key or not query.strip():
+        return False
+    try:
+        r = requests.get(
+            "https://pixabay.com/api/",
+            params={"key": pixabay_key, "q": query.strip(), "image_type": "all", "per_page": 5, "safesearch": "true"},
+            timeout=20,
+        )
+        for h in r.json().get("hits", []):
+            url = h.get("largeImageURL") or h.get("webformatURL")
+            if url:
+                out_jpg.write_bytes(requests.get(url, timeout=30).content)
+                return True
+    except Exception as exc:
+        print(f"[WARN] Pixabay short thumbnail image lookup failed for '{query}': {exc}")
+    return False
+
+
 def generate_curiosity_thumbnail(
-    lead_clip: Path, question_ml: str, out_jpg: Path, out_vertical_png: Path, font_path: str
+    lead_clip: Path, question_ml: str, out_jpg: Path, out_vertical_png: Path, font_path: str, thumb_query: str = ""
 ) -> None:
     raw_frame = out_jpg.parent / "thumb_raw_frame.jpg"
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-y",
-            "-ss",
-            "00:00:01.0",
-            "-i",
-            str(lead_clip),
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-            str(raw_frame),
-        ],
-        check=True,
-    )
+    if not (generate_gemini_topic_image(thumb_query, "9:16", raw_frame) or fetch_short_topic_image(thumb_query, raw_frame)):
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                "00:00:01.0",
+                "-i",
+                str(lead_clip),
+                "-frames:v",
+                "1",
+                "-q:v",
+                "2",
+                str(raw_frame),
+            ],
+            check=True,
+        )
 
     base = Image.open(raw_frame).convert("RGBA")
     base = ImageEnhance.Color(base).enhance(1.35)
@@ -508,7 +573,7 @@ def generate_curiosity_thumbnail(
         )
 
         badge_font = ImageFont.truetype(font_path, 42 if is_vertical else 34)
-        badge_text = "FACT CHECK  |  സത്യം എന്ത്?"
+        badge_text = "ഇതിന്റെ സത്യം എന്ത്?"
         bx0 = int(target_w * 0.14)
         bx1 = int(target_w * 0.86)
         by0 = int(target_h * (0.12 if is_vertical else 0.09))
@@ -541,15 +606,17 @@ def generate_curiosity_thumbnail(
         brand_font = ImageFont.truetype(font_path, 34 if is_vertical else 28)
         draw.text(
             (target_w // 2, int(target_h * 0.90)),
-            "DAILY LOGIC MALAYALAM",
+            "ഡെയിലി ലോജിക് മലയാളം",
             font=brand_font,
             fill=(0, 229, 255, 255),
             anchor="mm",
         )
         return canvas.convert("RGB")
 
-    build_card(1280, 720, False).save(out_jpg, quality=92)
-    build_card(1080, 1920, True).save(out_vertical_png)
+    # Shorts, IG Reels, and FB Reels all use 9:16 vertical thumbnails (1080x1920)
+    vertical_card = build_card(1080, 1920, True)
+    vertical_card.save(out_jpg, quality=92)
+    vertical_card.save(out_vertical_png)
 
 
 def parse_srt_time(ts: str) -> float:
@@ -658,17 +725,218 @@ def render_malayalam_subtitle_png(text: str, out_png: Path, font_path: str) -> N
     img.save(out_png)
 
 
+
+# ---------------------------------------------------------------------------
+# Procedural Royalty-Free BGM, SFX & 2D Motion Graphics Helpers
+# ---------------------------------------------------------------------------
+def synthesize_ambient_bgm(out_wav: Path, duration_sec: float, sample_rate: int = 44100) -> None:
+    """Generates a soft, warm royalty-free ambient curiosity pad (C-Am-F-G)."""
+    total_samples = int(duration_sec * sample_rate)
+    chords = [
+        (261.63, 329.63, 392.00, 493.88),  # Cmaj7
+        (220.00, 261.63, 329.63, 392.00),  # Am7
+        (174.61, 220.00, 261.63, 329.63),  # Fmaj7
+        (196.00, 246.94, 293.66, 329.63),  # G6
+    ]
+    chord_len = 4.0  # seconds per chord
+    fade_samples = int(1.0 * sample_rate)
+
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+
+        chunk_size = 4096
+        for start in range(0, total_samples, chunk_size):
+            end = min(total_samples, start + chunk_size)
+            buf = bytearray()
+            for i in range(start, end):
+                t = i / sample_rate
+                chord_idx = int(t // chord_len) % len(chords)
+                local_t = t % chord_len
+                # Smooth crossfade envelope within each chord
+                env = math.sin(math.pi * min(1.0, local_t / chord_len)) ** 0.45
+                if i < fade_samples:
+                    env *= i / fade_samples
+                elif i > total_samples - fade_samples:
+                    env *= max(0.0, (total_samples - i) / fade_samples)
+
+                freqs = chords[chord_idx]
+                val = 0.0
+                for idx_f, f in enumerate(freqs):
+                    val += math.sin(2.0 * math.pi * f * t) * (0.28 if idx_f == 0 else 0.18)
+                # Subtle warm shimmer
+                val += 0.06 * math.sin(2.0 * math.pi * (freqs[0] * 2.0) * t)
+                sample = max(-1.0, min(1.0, val * env * 0.35))
+                pcm = int(sample * 32767)
+                buf.extend(struct.pack("<hh", pcm, pcm))
+            wf.writeframes(bytes(buf))
+
+
+def synthesize_sfx_whoosh(out_wav: Path, duration_sec: float = 0.42, sample_rate: int = 44100) -> None:
+    """Generates a soft transition whoosh sound effect."""
+    total_samples = int(duration_sec * sample_rate)
+    rng = random.Random(42)
+    prev = 0.0
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        buf = bytearray()
+        for i in range(total_samples):
+            t = i / total_samples
+            env = math.sin(math.pi * t) ** 1.5
+            noise = rng.uniform(-1.0, 1.0)
+            # Simple low-pass smoothing that opens up in the middle
+            alpha = 0.08 + 0.25 * math.sin(math.pi * t)
+            prev = prev + alpha * (noise - prev)
+            pcm = int(max(-1.0, min(1.0, prev * env * 0.55)) * 32767)
+            buf.extend(struct.pack("<hh", pcm, pcm))
+        wf.writeframes(bytes(buf))
+
+
+def synthesize_sfx_pop(out_wav: Path, duration_sec: float = 0.16, sample_rate: int = 44100) -> None:
+    """Generates a clean UI pop sound effect for 2D card entries."""
+    total_samples = int(duration_sec * sample_rate)
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        buf = bytearray()
+        for i in range(total_samples):
+            t = i / sample_rate
+            p = i / total_samples
+            freq = 480.0 + 420.0 * (1.0 - p)
+            env = math.exp(-18.0 * t) * math.sin(math.pi * min(1.0, p * 4.0))
+            pcm = int(max(-1.0, min(1.0, math.sin(2.0 * math.pi * freq * t) * env * 0.6)) * 32767)
+            buf.extend(struct.pack("<hh", pcm, pcm))
+        wf.writeframes(bytes(buf))
+
+
+def render_2d_motion_card_clip(
+    card_title: str,
+    card_body_ml: str,
+    card_index: int,
+    duration_sec: float,
+    out_mp4: Path,
+    font_path: str,
+) -> None:
+    """Renders a 1080x1920 30fps animated 2D dark-tech explainer card via Pillow -> FFmpeg."""
+    fps = 30
+    total_frames = max(60, int(round(duration_sec * fps)))
+    W, H = 1080, 1920
+
+    # Pre-render static dark-tech grid background once for fast frame generation
+    bg = Image.new("RGB", (W, H), (10, 17, 36))
+    bg_draw = ImageDraw.Draw(bg)
+    for gx in range(0, W, 90):
+        bg_draw.line([(gx, 0), (gx, H)], fill=(18, 32, 62), width=2)
+    for gy in range(0, H, 90):
+        bg_draw.line([(0, gy), (W, gy)], fill=(18, 32, 62), width=2)
+    # Subtle glow bands
+    bg_draw.ellipse([140, 420, 940, 1220], outline=(0, 180, 220), width=3)
+
+    badge_font = ImageFont.truetype(font_path, 34)
+    title_font = ImageFont.truetype(font_path, 46)
+    body_font = ImageFont.truetype(font_path, 54)
+    wrapped_body = textwrap.fill(card_body_ml, width=20)
+
+    accent = (0, 229, 255) if card_index % 2 == 0 else (255, 214, 0)
+    badge_bg = (0, 140, 180) if card_index % 2 == 0 else (210, 140, 0)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(fps),
+        "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+        "-pix_fmt", "yuv420p", str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+
+    try:
+        for f in range(total_frames):
+            t = f / fps
+            p = min(1.0, f / 18.0)  # 0.6s ease-out slide-in
+            ease = 1.0 - (1.0 - p) ** 3
+            offset_y = int((1.0 - ease) * 180)
+
+            frame = bg.copy()
+            d = ImageDraw.Draw(frame)
+
+            # Animated pulsing ring
+            pulse = int(18 * math.sin(t * 3.5))
+            d.ellipse(
+                [540 - 320 - pulse, 860 - 320 - pulse, 540 + 320 + pulse, 860 + 320 + pulse],
+                outline=accent,
+                width=4,
+            )
+
+            # Main 2D card
+            cx0, cy0, cx1, cy1 = 90, 560 + offset_y, 990, 1140 + offset_y
+            d.rounded_rectangle([cx0, cy0, cx1, cy1], radius=36, fill=(16, 28, 54), outline=accent, width=5)
+
+            # Top badge inside card
+            d.rounded_rectangle([cx0 + 40, cy0 + 36, cx0 + 420, cy0 + 102], radius=24, fill=badge_bg)
+            d.text((cx0 + 230, cy0 + 69), card_title, font=badge_font, fill=(255, 255, 255), anchor="mm")
+
+            # Animated Malayalam takeaway text
+            d.multiline_text(
+                (540, cy0 + 300),
+                wrapped_body,
+                font=body_font,
+                fill=(255, 255, 255),
+                anchor="mm",
+                spacing=18,
+                align="center",
+            )
+
+            # Animated progress bar at bottom of card
+            bar_p = f / max(1, total_frames - 1)
+            bar_x0, bar_y0, bar_x1, bar_y1 = cx0 + 50, cy1 - 56, cx1 - 50, cy1 - 36
+            d.rounded_rectangle([bar_x0, bar_y0, bar_x1, bar_y1], radius=10, fill=(32, 50, 88))
+            fill_x1 = bar_x0 + max(20, int((bar_x1 - bar_x0) * bar_p))
+            d.rounded_rectangle([bar_x0, bar_y0, fill_x1, bar_y1], radius=10, fill=accent)
+
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        ret = proc.wait()
+        if ret != 0:
+            raise RuntimeError(f"FFmpeg 2D card render failed with exit code {ret}")
+
+
 def assemble_short_video(
     clips: List[Path],
     audio_path: Path,
     srt_path: Path,
     hook_headline: str,
+    key_points_ml: List[str],
     thumb_vertical_png: Path,
     final_video_path: Path,
     work_dir: Path,
 ) -> None:
     audio_duration = get_media_duration(audio_path)
-    segment_duration = max(3.5, (audio_duration + 0.5) / len(clips))
+    font_path = find_malayalam_font()
+    # Interleave up to 2 animated 2D explainer cards among stock clips
+    anim_cards: List[Path] = []
+    clean_points = [pt.strip() for pt in (key_points_ml or []) if pt.strip()][:2]
+    total_segments = len(clips) + len(clean_points)
+    segment_duration = max(3.5, (audio_duration + 0.5) / max(1, total_segments))
+
+    for c_idx, pt_text in enumerate(clean_points):
+        card_mp4 = work_dir / f"anim_card_{c_idx}.mp4"
+        print(f"      Rendering 2D animated explainer card {c_idx + 1}/{len(clean_points)}...")
+        render_2d_motion_card_clip(
+            card_title=f"പ്രധാന കാര്യം #{c_idx + 1}",
+            card_body_ml=pt_text,
+            card_index=c_idx,
+            duration_sec=segment_duration,
+            out_mp4=card_mp4,
+            font_path=font_path,
+        )
+        anim_cards.append(card_mp4)
 
     normalized_clips: List[Path] = []
     for idx, clip in enumerate(clips):
@@ -705,6 +973,19 @@ def assemble_short_video(
         subprocess.run(cmd, check=True)
         normalized_clips.append(norm_path)
 
+    # Interleave 2D motion cards after clip 0 and clip 1 for dynamic pacing
+    interleaved_clips: List[Path] = []
+    card_cursor = 0
+    for idx, norm_c in enumerate(normalized_clips):
+        interleaved_clips.append(norm_c)
+        if card_cursor < len(anim_cards) and idx in (0, 1):
+            interleaved_clips.append(anim_cards[card_cursor])
+            card_cursor += 1
+    while card_cursor < len(anim_cards):
+        interleaved_clips.append(anim_cards[card_cursor])
+        card_cursor += 1
+    normalized_clips = interleaved_clips
+
     concat_list_path = work_dir / "concat_list.txt"
     concat_lines = [f"file '{c.resolve()}'" for c in normalized_clips]
     concat_list_path.write_text("\n".join(concat_lines), encoding="utf-8")
@@ -729,14 +1010,55 @@ def assemble_short_video(
 
     cues = parse_and_coalesce_srt(srt_path, max_words_per_cue=8)
     print(f"      Rendering {len(cues)} coalesced Malayalam subtitle cues...")
-    font_path = find_malayalam_font()
 
     header_png = work_dir / "header.png"
     render_malayalam_header_png(hook_headline, header_png, font_path)
 
+    # Synthesize royalty-free ambient BGM + transition SFX and mix with voiceover
+    bgm_wav = work_dir / "bgm.wav"
+    whoosh_wav = work_dir / "whoosh.wav"
+    pop_wav = work_dir / "pop.wav"
+    mixed_audio_wav = work_dir / "mixed_audio.wav"
+    synthesize_ambient_bgm(bgm_wav, audio_duration + 1.0)
+    synthesize_sfx_whoosh(whoosh_wav)
+    synthesize_sfx_pop(pop_wav)
+
+    sfx_inputs = ["-i", str(audio_path), "-i", str(bgm_wav), "-i", str(whoosh_wav), "-i", str(pop_wav)]
+    sfx_filters = [
+        "[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[vo]",
+        "[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.11[bgm]",
+    ]
+    mix_labels = ["[vo]", "[bgm]"]
+    # Add whoosh on segment transitions and pop on 2D card entries
+    seg_times = [round(i * segment_duration, 2) for i in range(1, len(normalized_clips)) if i * segment_duration < audio_duration]
+    for s_i, st in enumerate(seg_times):
+        ms = int(st * 1000)
+        lbl = f"[w{s_i}]"
+        sfx_filters.append(f"[2:a]adelay={ms}|{ms},volume=0.22{lbl}")
+        mix_labels.append(lbl)
+    card_times = [round(segment_duration, 2), round(3 * segment_duration, 2)]
+    for p_i, ct in enumerate(card_times[:len(anim_cards)]):
+        if ct < audio_duration:
+            ms = int(ct * 1000) + 120
+            lbl = f"[p{p_i}]"
+            sfx_filters.append(f"[3:a]adelay={ms}|{ms},volume=0.28{lbl}")
+            mix_labels.append(lbl)
+
+    sfx_filters.append(
+        f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=first:dropout_transition=2:normalize=0[aout]"
+    )
+    subprocess.run(
+        [
+            "ffmpeg", "-y", *sfx_inputs,
+            "-filter_complex", ";".join(sfx_filters),
+            "-map", "[aout]", "-ac", "2", "-ar", "44100", str(mixed_audio_wav),
+        ],
+        check=True,
+    )
+
     cmd_inputs = [
         "-i", str(merged_bg_path),
-        "-i", str(audio_path),
+        "-i", str(mixed_audio_wav),
         "-i", str(header_png),
     ]
     filter_parts = [
@@ -1231,13 +1553,14 @@ def main() -> None:
     print("[5/7] Generating colorful curiosity thumbnail & rendering fast 1080x1920 video...")
     font_path = find_malayalam_font()
     generate_curiosity_thumbnail(
-        clips[0], plan.thumbnail_question_ml, thumb_jpg, thumb_vertical_png, font_path
+        clips[0], plan.thumbnail_question_ml, thumb_jpg, thumb_vertical_png, font_path, plan.thumbnail_image_query
     )
     assemble_short_video(
         clips,
         audio_path,
         srt_path,
         plan.hook_headline_ml,
+        plan.key_points_ml,
         thumb_vertical_png,
         final_video_path,
         WORK_DIR,
