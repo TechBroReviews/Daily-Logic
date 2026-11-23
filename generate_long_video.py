@@ -19,7 +19,10 @@ import os
 import re
 import subprocess
 import sys
+import math
+import struct
 import time
+import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
@@ -97,8 +100,11 @@ class ChapterPlan(BaseModel):
     fact_label_ml: Optional[str] = Field(
         default=None, description="Optional short verified fact in Malayalam (only for myths_busted)"
     )
+    animation_scene: str = Field(
+        description="Best matching 2D animation type from: 'wheel_brake', 'sound_waves', 'battery_heat', 'pressure_flow', 'gear_mechanism', 'light_optics', 'heart_pulse', 'comparison_bars'."
+    )
     search_queries: List[str] = Field(
-        description="3 short English visual search queries (2-3 words each) for 16:9 stock clips matching this chapter."
+        description="3 literal English visual search queries (2-3 words each, NO abbreviations like ABS/LED/AC) for 16:9 stock clips."
     )
 
 
@@ -300,6 +306,216 @@ def find_malayalam_font() -> str:
     return "DejaVuSans-Bold.ttf"
 
 
+def find_latin_font() -> str:
+    for path in (
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ):
+        if Path(path).exists():
+            return path
+    return "DejaVuSans-Bold.ttf"
+
+
+def _split_script_runs(text: str) -> List[tuple[str, bool]]:
+    return [(part, bool(re.fullmatch(r"[A-Za-z]+", part))) for part in re.findall(r"[A-Za-z]+|[^A-Za-z]+", text)]
+
+
+def measure_mixed_width(draw: ImageDraw.ImageDraw, text: str, ml_font: ImageFont.FreeTypeFont, lat_font: ImageFont.FreeTypeFont) -> float:
+    return sum(draw.textlength(seg, font=lat_font if is_lat else ml_font) for seg, is_lat in _split_script_runs(text))
+
+
+def wrap_mixed_text_px(
+    draw: ImageDraw.ImageDraw, text: str, ml_font: ImageFont.FreeTypeFont, lat_font: ImageFont.FreeTypeFont, max_w: int
+) -> List[str]:
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        test = f"{cur} {w}".strip()
+        if measure_mixed_width(draw, test, ml_font, lat_font) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [text]
+
+
+def draw_mixed_text_at(
+    draw: ImageDraw.ImageDraw,
+    x: float,
+    y: float,
+    text: str,
+    ml_font: ImageFont.FreeTypeFont,
+    lat_font: ImageFont.FreeTypeFont,
+    fill: tuple,
+    anchor_y: str = "t",
+) -> None:
+    cur_x = x
+    for seg, is_lat in _split_script_runs(text):
+        fnt = lat_font if is_lat else ml_font
+        draw.text((cur_x, y), seg, font=fnt, fill=fill, anchor=f"l{anchor_y}")
+        cur_x += draw.textlength(seg, font=fnt)
+
+
+def synthesize_looping_bgm_60s(out_wav: Path, duration_sec: float = 60.0, sample_rate: int = 44100) -> None:
+    total_samples = int(duration_sec * sample_rate)
+    chords = [
+        (261.63, 329.63, 392.00, 493.88),
+        (220.00, 261.63, 329.63, 392.00),
+        (174.61, 220.00, 261.63, 329.63),
+        (196.00, 246.94, 293.66, 329.63),
+    ]
+    chord_len = 5.0
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        chunk_size = 4096
+        for start in range(0, total_samples, chunk_size):
+            end = min(total_samples, start + chunk_size)
+            buf = bytearray()
+            for i in range(start, end):
+                t = i / sample_rate
+                chord_idx = int(t // chord_len) % len(chords)
+                local_t = t % chord_len
+                env = math.sin(math.pi * min(1.0, local_t / chord_len)) ** 0.45
+                freqs = chords[chord_idx]
+                val = sum(math.sin(2.0 * math.pi * f * t) * (0.28 if idx_f == 0 else 0.17) for idx_f, f in enumerate(freqs))
+                pcm = int(max(-1.0, min(1.0, val * env * 0.32)) * 32767)
+                buf.extend(struct.pack("<hh", pcm, pcm))
+            wf.writeframes(bytes(buf))
+
+
+def synthesize_whoosh_wav(out_wav: Path, duration_sec: float = 0.45, sample_rate: int = 44100) -> None:
+    import random as _rnd
+    rng = _rnd.Random(42)
+    total_samples = int(duration_sec * sample_rate)
+    prev = 0.0
+    with wave.open(str(out_wav), "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        buf = bytearray()
+        for i in range(total_samples):
+            t = i / total_samples
+            env = math.sin(math.pi * t) ** 1.5
+            alpha = 0.08 + 0.25 * math.sin(math.pi * t)
+            prev = prev + alpha * (rng.uniform(-1.0, 1.0) - prev)
+            pcm = int(max(-1.0, min(1.0, prev * env * 0.50)) * 32767)
+            buf.extend(struct.pack("<hh", pcm, pcm))
+        wf.writeframes(bytes(buf))
+
+
+def render_2d_animation_16x9(scene_type: str, title_ml: str, duration_sec: float, out_mp4: Path, font_path: str) -> None:
+    """Renders a 1920x1080 30fps 2D vector animation clip in the upper/center stage (y=60..760), cleanly above the callout box."""
+    fps = 30
+    total_frames = max(60, int(round(duration_sec * fps)))
+    W, H = 1920, 1080
+    lat_path = find_latin_font()
+    bg = Image.new("RGB", (W, H), (10, 17, 36))
+    bg_d = ImageDraw.Draw(bg)
+    for gx in range(0, W, 120):
+        bg_d.line([(gx, 0), (gx, H)], fill=(18, 32, 62), width=2)
+    for gy in range(0, H, 120):
+        bg_d.line([(0, gy), (W, gy)], fill=(18, 32, 62), width=2)
+
+    ml_f = ImageFont.truetype(font_path, 40)
+    lat_f = ImageFont.truetype(lat_path, 40)
+    title_lines = wrap_mixed_text_px(bg_d, title_ml, ml_f, lat_f, 1500)[:1]
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+    cx, cy = 960, 445
+    try:
+        for f in range(total_frames):
+            t = f / fps
+            progress = f / max(1, total_frames - 1)
+            frame = bg.copy()
+            d = ImageDraw.Draw(frame)
+            d.rounded_rectangle([110, 60, 1810, 770], radius=32, fill=(13, 23, 46), outline=(0, 229, 255), width=4)
+            tw = measure_mixed_width(d, title_lines[0], ml_f, lat_f)
+            draw_mixed_text_at(d, 960 - tw / 2, 112, title_lines[0], ml_f, lat_f, (250, 204, 21), anchor_y="m")
+
+            if scene_type == "wheel_brake":
+                d.line([(260, 660), (1660, 660)], fill=(0, 229, 255), width=6)
+                r_out, r_rim, r_disc = 195, 130, 88
+                d.ellipse([cx - r_out, cy - r_out, cx + r_out, cy + r_out], fill=(24, 30, 44), outline=(148, 163, 184), width=10)
+                d.ellipse([cx - r_rim, cy - r_rim, cx + r_rim, cy + r_rim], fill=(38, 52, 82), outline=(203, 213, 225), width=5)
+                for sp in range(6):
+                    a = t * 4.5 + sp * (math.pi / 3.0)
+                    d.line([(cx, cy), (cx + int(r_rim * math.cos(a)), cy + int(r_rim * math.sin(a)))], fill=(148, 163, 184), width=8)
+                d.ellipse([cx - r_disc, cy - r_disc, cx + r_disc, cy + r_disc], fill=(71, 85, 105), outline=(226, 232, 240), width=4)
+                pulse_on = int(t * 7.0) % 2 == 0
+                cal_col = (239, 68, 68) if pulse_on else (250, 204, 21)
+                off = 0 if pulse_on else 14
+                d.rounded_rectangle([cx + 65 + off, cy - 70, cx + 135 + off, cy + 70], radius=16, fill=cal_col, outline=(255, 255, 255), width=4)
+            elif scene_type == "sound_waves":
+                pts1, pts2 = [], []
+                for x in range(240, 1680, 18):
+                    ph = (x - 240) * 0.02 - t * 6.0
+                    pts1.append((x, cy - 80 + int(65 * math.sin(ph))))
+                    pts2.append((x, cy + 90 + int(65 * math.sin(ph + math.pi * min(1.0, progress * 1.3)))))
+                d.line(pts1, fill=(248, 113, 113), width=6)
+                d.line(pts2, fill=(0, 229, 255), width=6)
+            elif scene_type == "battery_heat":
+                d.rounded_rectangle([720, 220, 1200, 670], radius=30, fill=(18, 30, 58), outline=(0, 229, 255), width=6)
+                d.rounded_rectangle([880, 185, 1040, 225], radius=10, fill=(0, 229, 255))
+                bars = int(1 + 4 * ((t * 0.8) % 1.0))
+                for b in range(4):
+                    by0 = 560 - b * 100
+                    if b < bars:
+                        d.rounded_rectangle([760, by0, 1160, by0 + 80], radius=14, fill=(239, 68, 68) if b == 3 else (74, 222, 128))
+            elif scene_type == "pressure_flow":
+                d.rounded_rectangle([680, 310, 1240, 670], radius=32, fill=(20, 36, 68), outline=(56, 189, 248), width=6)
+                d.rectangle([890, 240, 1030, 315], fill=(250, 204, 21))
+                for p_i in range(16):
+                    px = 740 + ((p_i * 63) % 440)
+                    py = 640 - int(((t * 220 + p_i * 55) % 400))
+                    d.ellipse([px - 10, py - 10, px + 10, py + 10], fill=(0, 229, 255) if py > 310 else (255, 255, 255))
+            elif scene_type == "light_optics":
+                d.polygon([(960, 240), (760, 620), (1160, 620)], fill=(22, 42, 82), outline=(0, 229, 255), width=6)
+                d.line([(260, 400), (860, 440)], fill=(255, 255, 255), width=10)
+                for idx_r, rc in enumerate([(239, 68, 68), (250, 204, 21), (74, 222, 128), (56, 189, 248)]):
+                    d.line([(1060, 440), (1660, 320 + idx_r * 80 + int(18 * math.sin(t * 4.0 + idx_r)))], fill=rc, width=8)
+            elif scene_type == "heart_pulse":
+                pts = []
+                for x in range(240, 1680, 14):
+                    pos = ((x + int(t * 320)) % 240) / 240.0
+                    dy = -160 if 0.40 < pos < 0.48 else (105 if 0.48 <= pos < 0.56 else 0)
+                    pts.append((x, cy + dy))
+                d.line(pts, fill=(74, 222, 128), width=8)
+            elif scene_type == "comparison_bars":
+                for b_i, (bc, tgt) in enumerate(zip([(248, 113, 113), (250, 204, 21), (74, 222, 128)], [0.45, 0.72, 0.95])):
+                    bx0 = 560 + b_i * 310
+                    bh = int(380 * tgt * min(1.0, progress * 1.4))
+                    d.rounded_rectangle([bx0, 650 - bh, bx0 + 160, 650], radius=16, fill=bc)
+            else:
+                for g_cx, g_cy, rad, teeth, dir_s, col in [(820, 420, 135, 10, 1.0, (0, 229, 255)), (1080, 510, 105, 8, -1.25, (250, 204, 21))]:
+                    d.ellipse([g_cx - rad, g_cy - rad, g_cx + rad, g_cy + rad], outline=col, width=10)
+                    d.ellipse([g_cx - 34, g_cy - 34, g_cx + 34, g_cy + 34], fill=col)
+                    for k in range(teeth):
+                        ang = dir_s * t * 2.2 + k * (2 * math.pi / teeth)
+                        d.line([
+                            (g_cx + int((rad - 8) * math.cos(ang)), g_cy + int((rad - 8) * math.sin(ang))),
+                            (g_cx + int((rad + 24) * math.cos(ang)), g_cy + int((rad + 24) * math.sin(ang))),
+                        ], fill=col, width=16)
+
+            d.rounded_rectangle([240, 720, 1680, 738], radius=9, fill=(30, 46, 80))
+            d.rounded_rectangle([240, 720, 240 + max(20, int(1440 * progress)), 738], radius=9, fill=(0, 229, 255))
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("FFmpeg 2D 16:9 render failed")
+
+
 def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> List[str]:
     words = text.split()
     lines, cur = [], ""
@@ -319,57 +535,61 @@ def wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont
 def render_chapter_card(chapter_num: int, title_ml: str, out_png: Path, font_path: str) -> None:
     img = Image.new("RGB", (1920, 1080), (14, 24, 48))
     draw = ImageDraw.Draw(img)
+    lat_path = find_latin_font()
     draw.rectangle([140, 400, 165, 680], fill=(250, 204, 21))
     f_label = ImageFont.truetype(font_path, 44)
-    f_title = ImageFont.truetype(font_path, 72)
+    f_title_ml = ImageFont.truetype(font_path, 68)
+    f_title_lat = ImageFont.truetype(lat_path, 68)
     draw.text((200, 410), f"ഭാഗം {chapter_num}", font=f_label, fill=(250, 204, 21))
-    lines = wrap_text(draw, title_ml, f_title, 1520)[:2]
+    lines = wrap_mixed_text_px(draw, title_ml, f_title_ml, f_title_lat, 1520)[:2]
     y = 490
     for ln in lines:
-        draw.text((200, y), ln, font=f_title, fill=(255, 255, 255))
-        y += 95
+        draw_mixed_text_at(draw, 200, y, ln, f_title_ml, f_title_lat, (255, 255, 255))
+        y += 92
     f_brand = ImageFont.truetype(font_path, 32)
     draw.text((200, 960), "ഡെയിലി ലോജിക് മലയാളം", font=f_brand, fill=(148, 163, 184))
     img.save(out_png)
 
 
 def render_callout_overlay(chapter: ChapterPlan, out_png: Path, font_path: str) -> None:
-    """Transparent 1920x1080 PNG overlay with wrapped Malayalam text that never overflows its box."""
+    """Transparent 1920x1080 PNG overlay with mixed-script rendering and zero box overflow."""
     img = Image.new("RGBA", (1920, 1080), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    f_head = ImageFont.truetype(font_path, 34)
-    f_body = ImageFont.truetype(font_path, 38)
+    lat_path = find_latin_font()
+    f_head_ml = ImageFont.truetype(font_path, 32)
+    f_head_lat = ImageFont.truetype(lat_path, 32)
+    f_body_ml = ImageFont.truetype(font_path, 36)
+    f_body_lat = ImageFont.truetype(lat_path, 36)
     max_text_w = 1640
 
     if chapter.myth_label_ml and chapter.fact_label_ml:
-        myth_lines = wrap_text(draw, f"മിഥ്യ: {chapter.myth_label_ml}", f_head, max_text_w)[:2]
-        fact_lines = wrap_text(draw, f"സത്യം: {chapter.fact_label_ml}", f_body, max_text_w)[:2]
+        myth_lines = wrap_mixed_text_px(draw, f"മിഥ്യ: {chapter.myth_label_ml}", f_head_ml, f_head_lat, max_text_w)[:2]
+        fact_lines = wrap_mixed_text_px(draw, f"സത്യം: {chapter.fact_label_ml}", f_body_ml, f_body_lat, max_text_w)[:2]
         total_lines = len(myth_lines) + len(fact_lines)
-        box_h = 48 + total_lines * 52
-        y0 = max(720, 1030 - box_h)
+        box_h = 48 + total_lines * 50
+        y0 = max(760, 1030 - box_h)
         y1 = 1030
         draw.rounded_rectangle([80, y0, 1840, y1], radius=24, fill=(10, 18, 36, 225), outline=(250, 204, 21, 235), width=4)
         cur_y = y0 + 24
         for ln in myth_lines:
-            draw.text((120, cur_y), ln, font=f_head, fill=(248, 113, 113))
-            cur_y += 48
+            draw_mixed_text_at(draw, 120, cur_y, ln, f_head_ml, f_head_lat, (248, 113, 113))
+            cur_y += 46
         cur_y += 6
         for ln in fact_lines:
-            draw.text((120, cur_y), ln, font=f_body, fill=(74, 222, 128))
-            cur_y += 52
+            draw_mixed_text_at(draw, 120, cur_y, ln, f_body_ml, f_body_lat, (74, 222, 128))
+            cur_y += 50
     else:
-        fact_lines = wrap_text(draw, chapter.key_fact_ml, f_body, max_text_w)[:2]
-        box_h = 84 + len(fact_lines) * 54
-        y0 = max(750, 1030 - box_h)
+        fact_lines = wrap_mixed_text_px(draw, chapter.key_fact_ml, f_body_ml, f_body_lat, max_text_w)[:2]
+        box_h = 84 + len(fact_lines) * 52
+        y0 = max(780, 1030 - box_h)
         y1 = 1030
         draw.rounded_rectangle([80, y0, 1840, y1], radius=24, fill=(10, 18, 36, 225), outline=(250, 204, 21, 235), width=4)
-        draw.text((120, y0 + 22), "പ്രധാന കാര്യം", font=f_head, fill=(250, 204, 21))
-        cur_y = y0 + 72
+        draw.text((120, y0 + 22), "പ്രധാന കാര്യം", font=f_head_ml, fill=(250, 204, 21))
+        cur_y = y0 + 70
         for ln in fact_lines:
-            draw.text((120, cur_y), ln, font=f_body, fill=(255, 255, 255))
-            cur_y += 54
+            draw_mixed_text_at(draw, 120, cur_y, ln, f_body_ml, f_body_lat, (255, 255, 255))
+            cur_y += 52
     img.save(out_png)
-
 
 
 def generate_gemini_topic_image(subject_query: str, aspect_ratio: str, out_jpg: Path) -> bool:
@@ -472,13 +692,15 @@ def render_thumbnail_16x9(clip_path: Path, hook_ml: str, out_jpg: Path, font_pat
     draw.rounded_rectangle([48, 42, 470, 118], radius=36, fill=(239, 68, 68), outline=(255, 255, 255), width=4)
     draw.text((259, 80), "ഇതിന്റെ രഹസ്യം എന്ത്?", font=f_badge, fill=(255, 255, 255), anchor="mm")
 
-    f_hook = ImageFont.truetype(font_path, 66)
-    lines = wrap_text(draw, hook_ml, f_hook, 820)[:3]
+    lat_path = find_latin_font()
+    f_hook_ml = ImageFont.truetype(font_path, 62)
+    f_hook_lat = ImageFont.truetype(lat_path, 62)
+    lines = wrap_mixed_text_px(draw, hook_ml, f_hook_ml, f_hook_lat, 800)[:3]
     y = 220 if len(lines) == 3 else 270
     for ln in lines:
-        draw.text((54, y + 5), ln, font=f_hook, fill=(0, 0, 0))
-        draw.text((50, y), ln, font=f_hook, fill=(255, 235, 59))
-        y += 92
+        draw_mixed_text_at(draw, 54, y + 5, ln, f_hook_ml, f_hook_lat, (0, 0, 0))
+        draw_mixed_text_at(draw, 50, y, ln, f_hook_ml, f_hook_lat, (255, 235, 59))
+        y += 88
 
     f_brand = ImageFont.truetype(font_path, 30)
     draw.rounded_rectangle([48, 616, 460, 672], radius=24, fill=(0, 180, 216))
@@ -528,7 +750,11 @@ def fetch_landscape_clip(query: str, out_mp4: Path) -> bool:
             timeout=20,
         )
         hits = r.json().get("hits", [])
+        q_words = [w.lower() for w in re.findall(r"[a-zA-Z]{3,}", query)]
         for h in hits:
+            tags_lower = h.get("tags", "").lower()
+            if q_words and tags_lower and not any(w in tags_lower for w in q_words):
+                continue
             vids = h.get("videos", {})
             url = (vids.get("large") or vids.get("medium") or {}).get("url")
             if url:
@@ -564,19 +790,50 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     chapter_timestamps = []
     elapsed = 0.0
 
-    # Intro segment
+    # Pre-synthesize whoosh SFX for chapter cards & 60s ambient BGM
+    whoosh_wav = WORK_DIR / "whoosh.wav"
+    bgm_wav = WORK_DIR / "bgm_60s.wav"
+    synthesize_whoosh_wav(whoosh_wav)
+    synthesize_looping_bgm_60s(bgm_wav)
+
+    # Pre-fetch lead clips from all 5 chapters for a dynamic 5-clip Intro Montage!
+    intro_montage_clips: List[Path] = []
+    for c_idx, ch in enumerate(plan.chapters, start=1):
+        lead_mp4 = WORK_DIR / f"ch_{c_idx}_clip_0.mp4"
+        for q in ch.search_queries:
+            if fetch_landscape_clip(q, lead_mp4):
+                intro_montage_clips.append(lead_mp4)
+                break
+    if not intro_montage_clips:
+        raise RuntimeError("Could not download stock clips from Pixabay.")
+
+    # Intro segment (cycles through all 5 chapters' lead clips!)
     intro_mp3 = WORK_DIR / "intro.mp3"
     intro_dur = tts_to_mp3(plan.intro_narration_ml, intro_mp3)
-    intro_clip = WORK_DIR / "intro_stock.mp4"
-    if not fetch_landscape_clip(plan.chapters[0].search_queries[0], intro_clip):
-        raise RuntimeError("Could not download intro stock video from Pixabay.")
+    per_intro_dur = max(2.5, intro_dur / len(intro_montage_clips))
+    intro_trims = []
+    for i_idx, m_clip in enumerate(intro_montage_clips):
+        it_path = WORK_DIR / f"intro_trim_{i_idx}.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(m_clip),
+                "-t", f"{per_intro_dur:.2f}",
+                "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
+                "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23", str(it_path),
+            ],
+            check=True,
+        )
+        intro_trims.append(it_path)
+    intro_concat_txt = WORK_DIR / "intro_concat.txt"
+    intro_concat_txt.write_text("\n".join(f"file '{p.name}'" for p in intro_trims), encoding="utf-8")
+    intro_raw = WORK_DIR / "intro_raw.mp4"
+    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(intro_concat_txt), "-c", "copy", str(intro_raw)], check=True)
     intro_seg = WORK_DIR / "seg_intro.mp4"
     subprocess.run(
         [
-            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(intro_clip), "-i", str(intro_mp3),
-            "-t", f"{intro_dur:.2f}", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
+            "ffmpeg", "-y", "-i", str(intro_raw), "-i", str(intro_mp3),
+            "-map", "0:v:0", "-map", "1:a:0", "-t", f"{intro_dur:.2f}",
+            "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
         ],
         check=True,
     )
@@ -584,20 +841,21 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     elapsed += intro_dur
 
     # 5 Chapters
-    first_clip_for_thumb = intro_clip
+    first_clip_for_thumb = intro_montage_clips[0]
     for idx, ch in enumerate(plan.chapters, start=1):
         mins = int(elapsed // 60)
         secs = int(elapsed % 60)
         chapter_timestamps.append(f"{mins:02d}:{secs:02d} {ch.chapter_title_ml}")
 
-        # 2.5s Chapter title card
+        # 2.5s Chapter title card + whoosh SFX
         card_png = WORK_DIR / f"card_{idx}.png"
         card_mp4 = WORK_DIR / f"seg_card_{idx}.mp4"
         render_chapter_card(idx, ch.chapter_title_ml, card_png, font_path)
         subprocess.run(
             [
-                "ffmpeg", "-y", "-loop", "1", "-i", str(card_png),
-                "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+                "ffmpeg", "-y", "-loop", "1", "-i", str(card_png), "-i", str(whoosh_wav),
+                "-filter_complex", "[1:a]apad=whole_dur=2.5,volume=0.35[aout]",
+                "-map", "0:v:0", "-map", "[aout]",
                 "-t", "2.5", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", "30",
                 "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(card_mp4),
             ],
@@ -606,18 +864,27 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
         segments.append(card_mp4)
         elapsed += 2.5
 
-        # Chapter narration + 3 landscape clips concatenated + callout overlay
+        # Chapter narration + 2 landscape clips + 1 custom 2D vector animation clip + callout overlay
         ch_mp3 = WORK_DIR / f"ch_{idx}.mp3"
         ch_dur = tts_to_mp3(ch.narration_ml, ch_mp3)
         ch_clips = []
-        for q_i, q in enumerate(ch.search_queries[:3]):
+        lead_clip = WORK_DIR / f"ch_{idx}_clip_0.mp4"
+        if lead_clip.exists():
+            ch_clips.append(lead_clip)
+        for q_i, q in enumerate(ch.search_queries[1:2], start=1):
             c_path = WORK_DIR / f"ch_{idx}_clip_{q_i}.mp4"
             if fetch_landscape_clip(q, c_path):
                 ch_clips.append(c_path)
         if not ch_clips:
-            ch_clips = [intro_clip]
+            ch_clips = [first_clip_for_thumb]
 
-        per_clip_dur = ch_dur / len(ch_clips)
+        # Render 2D vector animation clip in center/upper stage (never covered by lower-third box!)
+        anim_mp4 = WORK_DIR / f"ch_{idx}_anim.mp4"
+        anim_dur = min(6.0, max(4.0, ch_dur * 0.25))
+        render_2d_animation_16x9(ch.animation_scene, ch.chapter_title_ml, anim_dur, anim_mp4, font_path)
+
+        stock_total = max(4.0, ch_dur - anim_dur)
+        per_clip_dur = stock_total / len(ch_clips)
         trimmed_clips = []
         for c_i, c_path in enumerate(ch_clips):
             tr_path = WORK_DIR / f"ch_{idx}_trim_{c_i}.mp4"
@@ -632,6 +899,8 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
                 check=True,
             )
             trimmed_clips.append(tr_path)
+            if c_i == 0:
+                trimmed_clips.append(anim_mp4)
 
         concat_txt = WORK_DIR / f"ch_{idx}_concat.txt"
         concat_txt.write_text("\n".join(f"file '{p.name}'" for p in trimmed_clips), encoding="utf-8")
@@ -663,7 +932,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     outro_seg = WORK_DIR / "seg_outro.mp4"
     subprocess.run(
         [
-            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(intro_clip), "-i", str(outro_mp3),
+            "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(first_clip_for_thumb), "-i", str(outro_mp3),
             "-t", f"{outro_dur:.2f}", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
             "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg),
@@ -672,13 +941,26 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     )
     segments.append(outro_seg)
 
-    # Concatenate all segments with +faststart
+    # Concatenate all segments + mix soft looping ambient BGM under voiceover
     full_concat = WORK_DIR / "full_concat.txt"
     full_concat.write_text("\n".join(f"file '{p.name}'" for p in segments), encoding="utf-8")
-    final_mp4 = WORK_DIR / "long_video.mp4"
+    merged_vo_mp4 = WORK_DIR / "long_merged_vo.mp4"
     subprocess.run(
         [
             "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(full_concat),
+            "-c", "copy", str(merged_vo_mp4),
+        ],
+        check=True,
+    )
+    final_mp4 = WORK_DIR / "long_video.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-i", str(merged_vo_mp4), "-i", str(bgm_wav),
+            "-filter_complex",
+            "[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=1.0[vo];"
+            "[1:a]aloop=loop=-1:size=2646000,aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,volume=0.08[bgm];"
+            "[vo][bgm]amix=inputs=2:duration=first:normalize=0[aout]",
+            "-map", "0:v:0", "-map", "[aout]",
             "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k",
             "-movflags", "+faststart", str(final_mp4),
         ],
