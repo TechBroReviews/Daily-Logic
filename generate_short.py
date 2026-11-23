@@ -125,7 +125,10 @@ class ShortScriptPlan(BaseModel):
         description="Natural, conversational spoken Kerala Malayalam script (115 to 145 words for ~60 seconds). Use short sentences and commas for natural human pauses. Spoken style only—no textbook stiffness, no stage directions, no markdown."
     )
     key_points_ml: List[str] = Field(
-        description="Exactly 2 short, punchy Malayalam fact/takeaway lines (6 to 10 words each) for 2D animated explainer cards."
+        description="Exactly 2 short, punchy Malayalam labels (3 to 5 words each) shown briefly above the 2D animation."
+    )
+    animation_scene: str = Field(
+        description="Best matching 2D animation type from: 'wheel_brake', 'sound_waves', 'battery_heat', 'pressure_flow', 'gear_mechanism', 'light_optics', 'heart_pulse', 'comparison_bars'."
     )
     search_queries: List[str] = Field(
         description="Exactly 4 concise 1-to-2 word ENGLISH visual search terms for stock videos matching the story."
@@ -262,8 +265,9 @@ CRITICAL RULES FOR UNIQUENESS & HUMAN TONE:
 6. Keep 'narration_malayalam' strictly to spoken Malayalam script (no [Music], no speaker labels, no asterisks, no English letters).
 7. Provide 'thumbnail_question_ml': a short 3-to-5 word curiosity-sparking Malayalam question that makes viewers want to click immediately.
 8. Provide 'reels_caption_ml': a punchy Malayalam/English caption for Instagram & Facebook Reels with 10-12 trending hashtags (#DailyLogicMalayalam #MalayalamReels #KeralaReels #MalayalamFacts #FactCheckMalayalam).
-9. Provide 'search_queries' in ENGLISH (4 simple 1-to-2 word visual terms matching each part of the story).
-10. Provide 'key_points_ml': exactly 2 short, punchy Malayalam takeaway lines (6-10 words each) to display on 2D animated explainer cards.
+9. Provide 'search_queries' in ENGLISH (4 literal 2-to-3 word visual scene descriptions—NEVER use abbreviations like ABS, LED, AC, or USB; e.g., use 'car driving wet road' instead of 'ABS').
+10. Provide 'key_points_ml': 2 very short Malayalam labels (3-5 words each) for the 2D animation title.
+11. Pick 'animation_scene' from: 'wheel_brake', 'sound_waves', 'battery_heat', 'pressure_flow', 'gear_mechanism', 'light_optics', 'heart_pulse', 'comparison_bars'.
 """
 
     last_err = None
@@ -374,81 +378,108 @@ def create_voiceover_and_srt(narration: str, audio_path: Path, srt_path: Path) -
 # ---------------------------------------------------------------------------
 # Step 4: Download Stock Clips
 # ---------------------------------------------------------------------------
+def _query_matches_tags(query: str, tags_str: str) -> bool:
+    if not tags_str:
+        return True
+    q_words = [w.lower() for w in re.findall(r"[a-zA-Z]{3,}", query)]
+    if not q_words:
+        return True
+    t_lower = tags_str.lower()
+    return any(w in t_lower for w in q_words)
+
+
 def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
     pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
     pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
     downloaded_clips: List[Path] = []
 
-    if pexels_key:
-        headers = {"Authorization": pexels_key}
-        for idx, query in enumerate(queries):
-            encoded_q = urllib.parse.quote(query)
-            url = f"https://api.pexels.com/videos/search?query={encoded_q}&per_page=5"
+    for idx, query in enumerate(queries):
+        clip_path = out_dir / f"raw_clip_{idx}.mp4"
+        got_clip = False
+
+        if pexels_key:
             try:
-                resp = requests.get(url, headers=headers, timeout=20)
+                resp = requests.get(
+                    f"https://api.pexels.com/videos/search?query={urllib.parse.quote(query)}&per_page=5",
+                    headers={"Authorization": pexels_key},
+                    timeout=20,
+                )
                 resp.raise_for_status()
-                videos = resp.json().get("videos", [])
-                if videos:
-                    clip_url = videos[0]["video_files"][0]["link"]
-                    clip_path = out_dir / f"raw_clip_{idx}.mp4"
-                    with requests.get(clip_url, stream=True, timeout=60) as r:
-                        r.raise_for_status()
-                        with open(clip_path, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                    downloaded_clips.append(clip_path)
+                for v in resp.json().get("videos", []):
+                    if _query_matches_tags(query, v.get("url", "")):
+                        clip_url = v["video_files"][0]["link"]
+                        with requests.get(clip_url, stream=True, timeout=60) as r:
+                            r.raise_for_status()
+                            with open(clip_path, "wb") as f:
+                                for chunk in r.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                        got_clip = True
+                        break
             except Exception as exc:
                 print(f"[WARN] Pexels fetch failed for '{query}': {exc}")
 
-    if not downloaded_clips and pixabay_key:
-        for idx, query in enumerate(queries):
-            encoded_q = urllib.parse.quote(query)
-            url = f"https://pixabay.com/api/videos/?key={pixabay_key}&q={encoded_q}&per_page=5"
+        if not got_clip and pixabay_key:
             try:
-                resp = requests.get(url, timeout=20)
+                resp = requests.get(
+                    f"https://pixabay.com/api/videos/?key={pixabay_key}&q={urllib.parse.quote(query)}&per_page=8&safesearch=true",
+                    timeout=20,
+                )
                 resp.raise_for_status()
-                hits = resp.json().get("hits", [])
-                if not hits:
-                    fallback_url = f"https://pixabay.com/api/videos/?key={pixabay_key}&q=daily+life+nature&per_page=5"
-                    hits = requests.get(fallback_url, timeout=20).json().get("hits", [])
-
-                if hits:
-                    videos_dict = hits[0].get("videos", {})
+                for h in resp.json().get("hits", []):
+                    if not _query_matches_tags(query, h.get("tags", "")):
+                        continue
+                    videos_dict = h.get("videos", {})
                     clip_url = (
                         videos_dict.get("medium", {}).get("url")
                         or videos_dict.get("small", {}).get("url")
                         or videos_dict.get("large", {}).get("url")
                     )
                     if clip_url:
-                        clip_path = out_dir / f"raw_clip_{idx}.mp4"
                         with requests.get(clip_url, stream=True, timeout=60) as r:
                             r.raise_for_status()
                             with open(clip_path, "wb") as f:
                                 for chunk in r.iter_content(chunk_size=8192):
                                     f.write(chunk)
-                        downloaded_clips.append(clip_path)
+                        got_clip = True
+                        break
             except Exception as exc:
-                print(f"[WARN] Pixabay fetch failed for '{query}': {exc}")
+                print(f"[WARN] Pixabay video fetch failed for '{query}': {exc}")
+
+        # Relevant Photo + Ken Burns fallback if no matching video was found (never download unrelated stock!)
+        if not got_clip and pixabay_key:
+            photo_tmp = out_dir / f"raw_photo_{idx}.jpg"
+            if fetch_short_topic_image(query, photo_tmp):
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg", "-y", "-loop", "1", "-i", str(photo_tmp),
+                            "-vf", "scale=1200:1400:force_original_aspect_ratio=increase,crop=1080:1240,zoompan=z='min(zoom+0.0015,1.15)':d=180:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1080x1240,fps=30,format=yuv420p",
+                            "-t", "6", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(clip_path),
+                        ],
+                        check=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    got_clip = True
+                except Exception as exc:
+                    print(f"[WARN] Photo zoom fallback failed for '{query}': {exc}")
+
+        if got_clip:
+            downloaded_clips.append(clip_path)
 
     if not downloaded_clips:
         print("[INFO] Using clean animated gradient backgrounds via FFmpeg...")
         colors = ["#132238", "#1B3B5F", "#0F2C4C", "#162A45"]
         for idx, color in enumerate(colors):
             clip_path = out_dir / f"raw_clip_{idx}.mp4"
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-f",
-                "lavfi",
-                "-i",
-                f"color=c={color}:s=1080x1920:r=30:d=15",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                str(clip_path),
-            ]
-            subprocess.run(cmd, check=True)
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", f"color=c={color}:s=1080x1920:r=30:d=15",
+                    "-c:v", "libx264", "-pix_fmt", "yuv420p", str(clip_path),
+                ],
+                check=True,
+            )
             downloaded_clips.append(clip_path)
 
     return downloaded_clips
@@ -468,6 +499,78 @@ def find_malayalam_font() -> str:
         if Path(path).exists():
             return path
     return "DejaVuSans-Bold.ttf"
+
+
+def find_latin_font() -> str:
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    ]
+    for path in candidates:
+        if Path(path).exists():
+            return path
+    return "DejaVuSans-Bold.ttf"
+
+
+def _split_script_runs(text: str) -> List[Tuple[str, bool]]:
+    """Splits text into (segment, is_latin) runs so English acronyms never render as tofu boxes."""
+    runs: List[Tuple[str, bool]] = []
+    for part in re.findall(r"[A-Za-z]+|[^A-Za-z]+", text):
+        runs.append((part, bool(re.fullmatch(r"[A-Za-z]+", part))))
+    return runs
+
+
+def measure_mixed_width(draw: ImageDraw.ImageDraw, text: str, ml_font: ImageFont.FreeTypeFont, lat_font: ImageFont.FreeTypeFont) -> float:
+    total = 0.0
+    for seg, is_lat in _split_script_runs(text):
+        total += draw.textlength(seg, font=lat_font if is_lat else ml_font)
+    return total
+
+
+def wrap_mixed_text_px(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    ml_font: ImageFont.FreeTypeFont,
+    lat_font: ImageFont.FreeTypeFont,
+    max_w: int,
+) -> List[str]:
+    words = text.split()
+    lines: List[str] = []
+    cur = ""
+    for w in words:
+        test = f"{cur} {w}".strip()
+        if measure_mixed_width(draw, test, ml_font, lat_font) <= max_w:
+            cur = test
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [text]
+
+
+def draw_mixed_centered_lines(
+    draw: ImageDraw.ImageDraw,
+    center_x: int,
+    center_y: int,
+    lines: List[str],
+    ml_font: ImageFont.FreeTypeFont,
+    lat_font: ImageFont.FreeTypeFont,
+    fill: Tuple[int, ...],
+    line_spacing: int = 14,
+) -> None:
+    line_h = ml_font.size + line_spacing
+    total_h = len(lines) * line_h - line_spacing
+    cur_y = center_y - total_h // 2 + ml_font.size // 2
+    for ln in lines:
+        w = measure_mixed_width(draw, ln, ml_font, lat_font)
+        cur_x = center_x - w / 2.0
+        for seg, is_lat in _split_script_runs(ln):
+            fnt = lat_font if is_lat else ml_font
+            draw.text((cur_x, cur_y), seg, font=fnt, fill=fill, anchor="lm")
+            cur_x += draw.textlength(seg, font=fnt)
+        cur_y += line_h
 
 
 
@@ -581,27 +684,15 @@ def generate_curiosity_thumbnail(
         draw.rounded_rectangle([bx0, by0, bx1, by1], radius=44, fill=(255, 61, 46, 255), outline=(255, 255, 255, 255), width=4)
         draw.text((target_w // 2, (by0 + by1) // 2), badge_text, font=badge_font, fill=(255, 255, 255, 255), anchor="mm")
 
-        q_font = ImageFont.truetype(font_path, 76 if is_vertical else 66)
-        wrapped_q = textwrap.fill(question_ml, width=16 if is_vertical else 22)
+        lat_path = find_latin_font()
+        font_sz = 68 if is_vertical else 60
+        q_font = ImageFont.truetype(font_path, font_sz)
+        q_lat = ImageFont.truetype(lat_path, font_sz)
+        max_q_w = int(target_w * 0.84)
+        q_lines = wrap_mixed_text_px(draw, question_ml, q_font, q_lat, max_q_w)[:3]
         q_y = int(target_h * (0.68 if is_vertical else 0.62))
-        draw.multiline_text(
-            (target_w // 2 + 4, q_y + 4),
-            wrapped_q,
-            font=q_font,
-            fill=(0, 0, 0, 230),
-            anchor="mm",
-            spacing=22,
-            align="center",
-        )
-        draw.multiline_text(
-            (target_w // 2, q_y),
-            wrapped_q,
-            font=q_font,
-            fill=(255, 235, 59, 255),
-            anchor="mm",
-            spacing=22,
-            align="center",
-        )
+        draw_mixed_centered_lines(draw, target_w // 2 + 4, q_y + 4, q_lines, q_font, q_lat, (0, 0, 0, 230), line_spacing=20)
+        draw_mixed_centered_lines(draw, target_w // 2, q_y, q_lines, q_font, q_lat, (255, 235, 59, 255), line_spacing=20)
 
         brand_font = ImageFont.truetype(font_path, 34 if is_vertical else 28)
         draw.text(
@@ -668,60 +759,48 @@ def parse_and_coalesce_srt(srt_path: Path, max_words_per_cue: int = 8) -> List[T
 def render_malayalam_header_png(headline: str, out_png: Path, font_path: str) -> None:
     img = Image.new("RGBA", (1080, 260), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype(font_path, 48)
-    wrapped = textwrap.fill(headline, width=26)
+    lat_path = find_latin_font()
+    font_sz = 42
+    ml_f = ImageFont.truetype(font_path, font_sz)
+    lat_f = ImageFont.truetype(lat_path, font_sz)
+    lines = wrap_mixed_text_px(draw, headline, ml_f, lat_f, 860)[:2]
 
     draw.rounded_rectangle(
-        [70, 30, 1010, 230],
+        [60, 20, 1020, 240],
         radius=28,
-        fill=(19, 34, 56, 220),
-        outline=(0, 229, 255, 220),
+        fill=(19, 34, 56, 228),
+        outline=(0, 229, 255, 230),
         width=3,
     )
-    draw.multiline_text(
-        (540, 130),
-        wrapped,
-        font=font,
-        fill=(255, 255, 255, 255),
-        anchor="mm",
-        spacing=12,
-        align="center",
-    )
+    draw_mixed_centered_lines(draw, 540, 130, lines, ml_f, lat_f, (255, 255, 255, 255), line_spacing=14)
     img.save(out_png)
 
 
 def render_malayalam_subtitle_png(text: str, out_png: Path, font_path: str) -> None:
     img = Image.new("RGBA", (1080, 360), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    font = ImageFont.truetype(font_path, 46)
+    lat_path = find_latin_font()
+    font_sz = 40
+    ml_f = ImageFont.truetype(font_path, font_sz)
+    lat_f = ImageFont.truetype(lat_path, font_sz)
+    lines = wrap_mixed_text_px(draw, text, ml_f, lat_f, 880)[:3]
 
-    wrapped = textwrap.fill(text, width=28)
-    bbox = draw.multiline_textbbox((0, 0), wrapped, font=font, spacing=14, align="center")
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-
-    pad_x, pad_y = 36, 22
-    box_w = tw + pad_x * 2
-    box_h = th + pad_y * 2
+    max_lw = max(measure_mixed_width(draw, ln, ml_f, lat_f) for ln in lines)
+    line_h = font_sz + 16
+    th = len(lines) * line_h - 10
+    box_w = min(980, int(max_lw) + 72)
+    box_h = min(320, th + 54)
     x0 = (1080 - box_w) // 2
     y0 = (360 - box_h) // 2
 
     draw.rounded_rectangle(
         [x0, y0, x0 + box_w, y0 + box_h],
         radius=24,
-        fill=(12, 18, 34, 215),
-        outline=(0, 229, 255, 180),
+        fill=(12, 18, 34, 220),
+        outline=(0, 229, 255, 190),
         width=2,
     )
-    draw.multiline_text(
-        (540, 180),
-        wrapped,
-        font=font,
-        fill=(255, 235, 59, 255),
-        anchor="mm",
-        spacing=14,
-        align="center",
-    )
+    draw_mixed_centered_lines(draw, 540, 180, lines, ml_f, lat_f, (255, 235, 59, 255), line_spacing=16)
     img.save(out_png)
 
 
@@ -813,6 +892,117 @@ def synthesize_sfx_pop(out_wav: Path, duration_sec: float = 0.16, sample_rate: i
         wf.writeframes(bytes(buf))
 
 
+def _draw_2d_animation_scene(d: ImageDraw.ImageDraw, scene_type: str, t: float, progress: float) -> None:
+    """Draws real 2D vector mechanism animations cleanly in the center stage (y=460..1240)."""
+    cx, cy = 540, 860
+
+    if scene_type == "wheel_brake":
+        # Wet road + rain streaks
+        d.line([(80, 1130), (1000, 1130)], fill=(0, 229, 255), width=6)
+        for r_i in range(10):
+            rx = 140 + ((r_i * 95 + int(t * 220)) % 820)
+            ry = 480 + ((r_i * 110 + int(t * 480)) % 620)
+            d.line([(rx, ry), (rx - 12, ry + 32)], fill=(56, 189, 248), width=3)
+
+        # Rotating tire + brake disc + pulsing ABS brake caliper
+        r_outer, r_rim, r_disc = 230, 155, 105
+        d.ellipse([cx - r_outer, cy - r_outer, cx + r_outer, cy + r_outer], fill=(24, 30, 44), outline=(148, 163, 184), width=10)
+        d.ellipse([cx - r_rim, cy - r_rim, cx + r_rim, cy + r_rim], fill=(38, 52, 82), outline=(203, 213, 225), width=5)
+        angle = t * 4.5
+        for sp in range(6):
+            a = angle + sp * (math.pi / 3.0)
+            d.line([(cx, cy), (cx + int(r_rim * math.cos(a)), cy + int(r_rim * math.sin(a)))], fill=(148, 163, 184), width=8)
+        d.ellipse([cx - r_disc, cy - r_disc, cx + r_disc, cy + r_disc], fill=(71, 85, 105), outline=(226, 232, 240), width=4)
+
+        # Pulsing ABS Brake Caliper (rapidly clamps & releases)
+        pulse_on = int(t * 7.0) % 2 == 0
+        cal_color = (239, 68, 68) if pulse_on else (250, 204, 21)
+        clamp_off = 0 if pulse_on else 14
+        d.rounded_rectangle([cx + 70 + clamp_off, cy - 80, cx + 150 + clamp_off, cy + 80], radius=18, fill=cal_color, outline=(255, 255, 255), width=4)
+        # Grip indicator bar
+        d.rounded_rectangle([240, 1170, 840, 1196], radius=12, fill=(30, 41, 59))
+        d.rounded_rectangle([240, 1170, 240 + int(600 * (0.45 + 0.5 * progress)), 1196], radius=12, fill=(74, 222, 128))
+
+    elif scene_type == "sound_waves":
+        # Two opposing sine waves cancelling out
+        pts1, pts2, pts_sum = [], [], []
+        for x in range(120, 960, 14):
+            phase = (x - 120) * 0.028 - t * 6.0
+            y1 = cy - 150 + int(70 * math.sin(phase))
+            y2 = cy + 20 + int(70 * math.sin(phase + math.pi * min(1.0, progress * 1.3)))
+            ys = cy + 190 + int(70 * (1.0 - min(1.0, progress * 1.3)) * math.sin(phase))
+            pts1.append((x, y1))
+            pts2.append((x, y2))
+            pts_sum.append((x, ys))
+        d.line(pts1, fill=(248, 113, 113), width=6)
+        d.line(pts2, fill=(0, 229, 255), width=6)
+        d.line(pts_sum, fill=(74, 222, 128), width=7)
+
+    elif scene_type == "battery_heat":
+        # Animated battery + thermal level
+        d.rounded_rectangle([340, 560, 740, 1120], radius=32, fill=(18, 30, 58), outline=(0, 229, 255), width=6)
+        d.rounded_rectangle([470, 520, 610, 565], radius=10, fill=(0, 229, 255))
+        bars = int(1 + 4 * ((t * 0.8) % 1.0))
+        for b in range(4):
+            by0 = 980 - b * 120
+            col = (239, 68, 68) if b == 3 else (74, 222, 128)
+            if b < bars:
+                d.rounded_rectangle([380, by0, 700, by0 + 95], radius=16, fill=col)
+
+    elif scene_type == "pressure_flow":
+        # Animated vessel + rising steam/flow particles
+        d.rounded_rectangle([310, 720, 770, 1120], radius=36, fill=(20, 36, 68), outline=(56, 189, 248), width=6)
+        d.rectangle([480, 640, 600, 725], fill=(250, 204, 21))
+        for p_i in range(14):
+            px = 370 + ((p_i * 53) % 340)
+            py = 1080 - int(((t * 240 + p_i * 65) % 480))
+            d.ellipse([px - 12, py - 12, px + 12, py + 12], fill=(0, 229, 255) if py > 720 else (255, 255, 255))
+
+    elif scene_type == "gear_mechanism":
+        # Two interlocking rotating gears
+        for g_cx, g_cy, rad, teeth, dir_s, col in [(420, 820, 150, 10, 1.0, (0, 229, 255)), (665, 930, 115, 8, -1.25, (250, 204, 21))]:
+            d.ellipse([g_cx - rad, g_cy - rad, g_cx + rad, g_cy + rad], outline=col, width=10)
+            d.ellipse([g_cx - 38, g_cy - 38, g_cx + 38, g_cy + 38], fill=col)
+            for k in range(teeth):
+                ang = dir_s * t * 2.2 + k * (2 * math.pi / teeth)
+                x0 = g_cx + int((rad - 8) * math.cos(ang))
+                y0 = g_cy + int((rad - 8) * math.sin(ang))
+                x1 = g_cx + int((rad + 28) * math.cos(ang))
+                y1 = g_cy + int((rad + 28) * math.sin(ang))
+                d.line([(x0, y0), (x1, y1)], fill=col, width=16)
+
+    elif scene_type == "light_optics":
+        # Light beam hitting a prism/mirror and splitting into spectrum rays
+        d.polygon([(540, 630), (360, 1030), (720, 1030)], fill=(22, 42, 82), outline=(0, 229, 255), width=6)
+        d.line([(100, 790), (450, 830)], fill=(255, 255, 255), width=10)
+        ray_cols = [(239, 68, 68), (250, 204, 21), (74, 222, 128), (56, 189, 248)]
+        for idx_r, rc in enumerate(ray_cols):
+            shift = int(20 * math.sin(t * 4.0 + idx_r))
+            d.line([(630, 830), (980, 730 + idx_r * 75 + shift)], fill=rc, width=8)
+
+    elif scene_type == "heart_pulse":
+        # Animated ECG waveform
+        pts = []
+        for x in range(110, 970, 12):
+            pos = ((x + int(t * 320)) % 220) / 220.0
+            dy = 0
+            if 0.40 < pos < 0.48:
+                dy = -190
+            elif 0.48 <= pos < 0.56:
+                dy = 120
+            pts.append((x, cy + dy))
+        d.line(pts, fill=(74, 222, 128), width=8)
+
+    else:
+        # comparison_bars: animated 3-bar visual comparison
+        bar_cols = [(248, 113, 113), (250, 204, 21), (74, 222, 128)]
+        targets = [0.45, 0.72, 0.95]
+        for b_i, (bc, tgt) in enumerate(zip(bar_cols, targets)):
+            bx0 = 230 + b_i * 230
+            bh = int(420 * tgt * min(1.0, progress * 1.4))
+            d.rounded_rectangle([bx0, 1080 - bh, bx0 + 130, 1080], radius=16, fill=bc)
+
+
 def render_2d_motion_card_clip(
     card_title: str,
     card_body_ml: str,
@@ -820,29 +1010,27 @@ def render_2d_motion_card_clip(
     duration_sec: float,
     out_mp4: Path,
     font_path: str,
+    animation_scene: str = "gear_mechanism",
 ) -> None:
-    """Renders a 1080x1920 30fps animated 2D dark-tech explainer card via Pillow -> FFmpeg."""
+    """Renders a 1080x1920 30fps 2D vector animation clip in the center stage (no subtitle overlap!)."""
     fps = 30
     total_frames = max(60, int(round(duration_sec * fps)))
     W, H = 1080, 1920
+    lat_path = find_latin_font()
 
-    # Pre-render static dark-tech grid background once for fast frame generation
     bg = Image.new("RGB", (W, H), (10, 17, 36))
     bg_draw = ImageDraw.Draw(bg)
     for gx in range(0, W, 90):
         bg_draw.line([(gx, 0), (gx, H)], fill=(18, 32, 62), width=2)
     for gy in range(0, H, 90):
         bg_draw.line([(0, gy), (W, gy)], fill=(18, 32, 62), width=2)
-    # Subtle glow bands
-    bg_draw.ellipse([140, 420, 940, 1220], outline=(0, 180, 220), width=3)
 
-    badge_font = ImageFont.truetype(font_path, 34)
-    title_font = ImageFont.truetype(font_path, 46)
-    body_font = ImageFont.truetype(font_path, 54)
-    wrapped_body = textwrap.fill(card_body_ml, width=20)
-
+    title_font = ImageFont.truetype(font_path, 38)
+    title_lat = ImageFont.truetype(lat_path, 38)
     accent = (0, 229, 255) if card_index % 2 == 0 else (255, 214, 0)
-    badge_bg = (0, 140, 180) if card_index % 2 == 0 else (210, 140, 0)
+
+    # Short 1-line label sits cleanly ABOVE the animation (y=410..480), never covering it
+    label_lines = wrap_mixed_text_px(bg_draw, card_body_ml, title_font, title_lat, 860)[:1]
 
     cmd = [
         "ffmpeg", "-y",
@@ -858,46 +1046,19 @@ def render_2d_motion_card_clip(
     try:
         for f in range(total_frames):
             t = f / fps
-            p = min(1.0, f / 18.0)  # 0.6s ease-out slide-in
-            ease = 1.0 - (1.0 - p) ** 3
-            offset_y = int((1.0 - ease) * 180)
-
+            progress = f / max(1, total_frames - 1)
             frame = bg.copy()
             d = ImageDraw.Draw(frame)
 
-            # Animated pulsing ring
-            pulse = int(18 * math.sin(t * 3.5))
-            d.ellipse(
-                [540 - 320 - pulse, 860 - 320 - pulse, 540 + 320 + pulse, 860 + 320 + pulse],
-                outline=accent,
-                width=4,
-            )
+            # Clean border around the 2D animation stage (y=390..1280) -> subtitles stay safely at y=1390!
+            d.rounded_rectangle([65, 390, 1015, 1280], radius=32, fill=(13, 23, 46), outline=accent, width=4)
+            draw_mixed_centered_lines(d, 540, 445, label_lines, title_font, title_lat, accent, line_spacing=8)
 
-            # Main 2D card
-            cx0, cy0, cx1, cy1 = 90, 560 + offset_y, 990, 1140 + offset_y
-            d.rounded_rectangle([cx0, cy0, cx1, cy1], radius=36, fill=(16, 28, 54), outline=accent, width=5)
+            _draw_2d_animation_scene(d, animation_scene, t, progress)
 
-            # Top badge inside card
-            d.rounded_rectangle([cx0 + 40, cy0 + 36, cx0 + 420, cy0 + 102], radius=24, fill=badge_bg)
-            d.text((cx0 + 230, cy0 + 69), card_title, font=badge_font, fill=(255, 255, 255), anchor="mm")
-
-            # Animated Malayalam takeaway text
-            d.multiline_text(
-                (540, cy0 + 300),
-                wrapped_body,
-                font=body_font,
-                fill=(255, 255, 255),
-                anchor="mm",
-                spacing=18,
-                align="center",
-            )
-
-            # Animated progress bar at bottom of card
-            bar_p = f / max(1, total_frames - 1)
-            bar_x0, bar_y0, bar_x1, bar_y1 = cx0 + 50, cy1 - 56, cx1 - 50, cy1 - 36
-            d.rounded_rectangle([bar_x0, bar_y0, bar_x1, bar_y1], radius=10, fill=(32, 50, 88))
-            fill_x1 = bar_x0 + max(20, int((bar_x1 - bar_x0) * bar_p))
-            d.rounded_rectangle([bar_x0, bar_y0, fill_x1, bar_y1], radius=10, fill=accent)
+            # Clean progress bar at bottom of stage
+            d.rounded_rectangle([120, 1236, 960, 1252], radius=8, fill=(30, 46, 80))
+            d.rounded_rectangle([120, 1236, 120 + max(16, int(840 * progress)), 1252], radius=8, fill=accent)
 
             proc.stdin.write(frame.tobytes())
     finally:
@@ -913,6 +1074,7 @@ def assemble_short_video(
     srt_path: Path,
     hook_headline: str,
     key_points_ml: List[str],
+    animation_scene: str,
     thumb_vertical_png: Path,
     final_video_path: Path,
     work_dir: Path,
@@ -935,6 +1097,7 @@ def assemble_short_video(
             duration_sec=segment_duration,
             out_mp4=card_mp4,
             font_path=font_path,
+            animation_scene=animation_scene,
         )
         anim_cards.append(card_mp4)
 
@@ -1062,7 +1225,7 @@ def assemble_short_video(
         "-i", str(header_png),
     ]
     filter_parts = [
-        "[0:v][2:v]overlay=0:120[vhead]",
+        "[0:v][2:v]overlay=0:90[vhead]",
     ]
     last_label = "[vhead]"
 
@@ -1561,6 +1724,7 @@ def main() -> None:
         srt_path,
         plan.hook_headline_ml,
         plan.key_points_ml,
+        plan.animation_scene,
         thumb_vertical_png,
         final_video_path,
         WORK_DIR,
