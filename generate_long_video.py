@@ -933,7 +933,7 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     subprocess.run(
         [
             "ffmpeg", "-y", "-stream_loop", "-1", "-i", str(first_clip_for_thumb), "-i", str(outro_mp3),
-            "-t", f"{outro_dur:.2f}", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
+            "-t", f"{outro_dur:.2f}", "-map", "0:v:0", "-map", "1:a:0", "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30",
             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast", "-crf", "23",
             "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(outro_seg),
         ],
