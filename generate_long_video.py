@@ -22,6 +22,7 @@ import sys
 import math
 import struct
 import time
+import urllib.parse
 import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -740,6 +741,97 @@ def tts_to_mp3(text: str, out_mp3: Path) -> float:
     return float(probe)
 
 
+def search_web_topic_photo_16x9(query: str, out_jpg: Path) -> bool:
+    if not query.strip():
+        return False
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        r = requests.get(
+            f"https://www.bing.com/images/search?q={urllib.parse.quote_plus(query)}&qft=+filterui:imagesize-large&form=HDRSC2",
+            headers=headers,
+            timeout=15,
+        )
+        if r.ok:
+            for img_url in re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+)', r.text)[:8]:
+                if any(b in img_url.lower() for b in ("logo", "favicon", "icon", ".svg")):
+                    continue
+                try:
+                    ir = requests.get(img_url, headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 18000:
+                        out_jpg.write_bytes(ir.content)
+                        with Image.open(out_jpg) as im:
+                            if im.width >= 450 and im.height >= 250:
+                                im.convert("RGB").save(out_jpg, quality=92)
+                                return True
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return False
+
+
+def render_dynamic_topic_16x9(img_path: Path, out_mp4: Path, duration_sec: float = 6.0, style_idx: int = 0) -> None:
+    """Renders 1920x1080 30fps dynamic fly-in + zoom + swipe-out animation for topic photos."""
+    from PIL import ImageEnhance
+    fps = 30
+    total_frames = max(60, int(round(duration_sec * fps)))
+    W, H = 1920, 1080
+    cx, cy = 960, 445
+    bg = Image.new("RGB", (W, H), (10, 17, 36))
+    bg_d = ImageDraw.Draw(bg)
+    for gx in range(0, W, 120):
+        bg_d.line([(gx, 0), (gx, H)], fill=(18, 32, 62), width=2)
+    for gy in range(0, H, 120):
+        bg_d.line([(0, gy), (W, gy)], fill=(18, 32, 62), width=2)
+
+    prod = ImageEnhance.Color(Image.open(img_path).convert("RGB")).enhance(1.18)
+    base_scale = min(980 / prod.width, 620 / prod.height)
+    bw, bh = max(240, int(prod.width * base_scale)), max(200, int(prod.height * base_scale))
+    prod_base = prod.resize((bw, bh), Image.Resampling.LANCZOS)
+    accent = (0, 229, 255) if style_idx % 2 == 0 else (250, 204, 21)
+    mode = style_idx % 4
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+    try:
+        for f in range(total_frames):
+            p = f / max(1, total_frames - 1)
+            t = f / fps
+            frame = bg.copy()
+            d = ImageDraw.Draw(frame)
+            ring_r = 280 + int(16 * math.sin(t * 3.5))
+            d.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r], outline=accent, width=3)
+
+            dx, dy, scale_f = 0, 0, 1.0
+            if p < 0.16:
+                ep = 1.0 - (1.0 - p / 0.16) ** 3
+                dx = int((1.0 - ep) * (1200 if mode % 2 == 0 else -1200))
+                scale_f = 0.85 + 0.15 * ep
+            elif p > 0.85:
+                sp = ((p - 0.85) / 0.15) ** 2
+                dx = int((-1300 if mode % 2 == 0 else 1300) * sp)
+            else:
+                mid_p = (p - 0.16) / 0.69
+                scale_f = 1.0 + 0.10 * mid_p
+                dy = int(12 * math.sin(t * 3.0))
+
+            nw, nh = max(140, int(bw * scale_f)), max(120, int(bh * scale_f))
+            p_res = prod_base.resize((nw, nh), Image.Resampling.BILINEAR)
+            px, py = cx + dx - nw // 2, cy + dy - nh // 2
+            d.rounded_rectangle([px - 14, py - 14, px + nw + 14, py + nh + 14], radius=24, fill=(18, 30, 58), outline=accent, width=4)
+            frame.paste(p_res, (px, py))
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("16:9 dynamic topic animation failed")
+
+
 def fetch_landscape_clip(query: str, out_mp4: Path) -> bool:
     if not PIXABAY_API_KEY:
         return False
@@ -765,21 +857,12 @@ def fetch_landscape_clip(query: str, out_mp4: Path) -> bool:
         print(f"[WARN] Pixabay video lookup failed for '{query}': {exc}")
 
     photo_tmp = out_mp4.with_suffix(".jpg")
-    if fetch_topic_image_from_pixabay(query, photo_tmp):
+    if search_web_topic_photo_16x9(query, photo_tmp) or fetch_topic_image_from_pixabay(query, photo_tmp):
         try:
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-loop", "1", "-i", str(photo_tmp),
-                    "-vf", "scale=2160:1215:force_original_aspect_ratio=increase,crop=2160:1215,zoompan=z='min(zoom+0.0012,1.15)':d=240:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':s=1920x1080,fps=30,format=yuv420p",
-                    "-t", "8", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(out_mp4),
-                ],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            render_dynamic_topic_16x9(photo_tmp, out_mp4, duration_sec=6.0, style_idx=abs(hash(query)) % 4)
             return True
         except Exception as exc:
-            print(f"[WARN] Ken Burns photo fallback failed for '{query}': {exc}")
+            print(f"[WARN] Dynamic photo fallback failed for '{query}': {exc}")
     return False
 
 

@@ -388,6 +388,110 @@ def _query_matches_tags(query: str, tags_str: str) -> bool:
     return any(w in t_lower for w in q_words)
 
 
+def search_exact_topic_images(query: str, out_dir: Path, max_images: int = 3) -> List[Path]:
+    """Fetches real high-res topic photos from public web search for faster, more relevant visuals."""
+    saved: List[Path] = []
+    if not query.strip():
+        return saved
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    q = urllib.parse.quote_plus(query.strip())
+    try:
+        r = requests.get(f"https://www.bing.com/images/search?q={q}&qft=+filterui:imagesize-large&form=HDRSC2", headers=headers, timeout=15)
+        if r.ok:
+            urls = re.findall(r'murl(?:&quot;|")\s*:\s*(?:&quot;|")(https?://[^"&]+)', r.text)
+            for img_url in urls[:10]:
+                if len(saved) >= max_images:
+                    break
+                if any(b in img_url.lower() for b in ("logo", "favicon", "avatar", "icon", ".svg", "placeholder")):
+                    continue
+                try:
+                    ir = requests.get(img_url, headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 18000:
+                        out_img = out_dir / f"topic_web_{len(saved)}.jpg"
+                        out_img.write_bytes(ir.content)
+                        with Image.open(out_img) as im:
+                            if im.width >= 450 and im.height >= 300:
+                                im.convert("RGB").save(out_img, quality=92)
+                                saved.append(out_img)
+                                print(f"[INFO] Fetched real topic photo: {img_url[:75]}")
+                except Exception:
+                    continue
+    except Exception as exc:
+        print(f"[WARN] Topic photo search failed for '{query}': {exc}")
+    return saved
+
+
+def render_dynamic_photo_clip(img_path: Path, out_mp4: Path, duration_sec: float = 3.8, style_idx: int = 0) -> None:
+    """Renders 1080x1920 30fps dynamic fly-in + bounce-zoom + swipe-out animation for topic photos."""
+    fps = 30
+    total_frames = max(60, int(round(duration_sec * fps)))
+    W, H = 1080, 1920
+    cx, cy = 540, 840
+    bg = Image.new("RGB", (W, H), (10, 17, 36))
+    bg_d = ImageDraw.Draw(bg)
+    for gx in range(0, W, 90):
+        bg_d.line([(gx, 0), (gx, H)], fill=(18, 32, 62), width=2)
+    for gy in range(0, H, 90):
+        bg_d.line([(0, gy), (W, gy)], fill=(18, 32, 62), width=2)
+
+    prod = ImageEnhance.Color(Image.open(img_path).convert("RGB")).enhance(1.18)
+    base_scale = min(860 / prod.width, 860 / prod.height)
+    bw, bh = max(200, int(prod.width * base_scale)), max(200, int(prod.height * base_scale))
+    prod_base = prod.resize((bw, bh), Image.Resampling.LANCZOS)
+    accent = (0, 229, 255) if style_idx % 2 == 0 else (255, 214, 0)
+    mode = style_idx % 4
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgb24", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p", str(out_mp4),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+    try:
+        for f in range(total_frames):
+            p = f / max(1, total_frames - 1)
+            t = f / fps
+            frame = bg.copy()
+            d = ImageDraw.Draw(frame)
+            ring_r = 350 + int(20 * math.sin(t * 4.0))
+            d.ellipse([cx - ring_r, cy - ring_r, cx + ring_r, cy + ring_r], outline=accent, width=3)
+
+            dx, dy, scale_f = 0, 0, 1.0
+            if p < 0.20:
+                ep = 1.0 - (1.0 - p / 0.20) ** 3
+                if mode == 0:
+                    dx, scale_f = int((1.0 - ep) * 950), 0.85 + 0.15 * ep
+                elif mode == 1:
+                    dy, scale_f = int((1.0 - ep) * 700), 0.65 + 0.35 * ep
+                elif mode == 2:
+                    dx, scale_f = int(-(1.0 - ep) * 950), 0.85 + 0.15 * ep
+                else:
+                    scale_f = 0.40 + 0.60 * ep
+            elif p > 0.82:
+                sp = ((p - 0.82) / 0.18) ** 2
+                dx = int((-1150 if mode in (0, 3) else 1150) * sp)
+                scale_f = 1.06 - 0.12 * sp
+            else:
+                mid_p = (p - 0.20) / 0.62
+                scale_f = 1.0 + 0.10 * mid_p
+                dy = int(14 * math.sin(t * 3.2))
+
+            nw, nh = max(120, int(bw * scale_f)), max(120, int(bh * scale_f))
+            p_res = prod_base.resize((nw, nh), Image.Resampling.BILINEAR)
+            px, py = cx + dx - nw // 2, cy + dy - nh // 2
+            d.rounded_rectangle([px - 14, py - 14, px + nw + 14, py + nh + 14], radius=28, fill=(18, 30, 58), outline=accent, width=5)
+            frame.paste(p_res, (px, py))
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("Dynamic photo animation failed")
+
+
 def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
     pexels_key = os.getenv("PEXELS_API_KEY", "").strip()
     pixabay_key = os.getenv("PIXABAY_API_KEY", "").strip()
@@ -481,6 +585,14 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
                 check=True,
             )
             downloaded_clips.append(clip_path)
+
+    # Also fetch 2 real topic photos and animate them with dynamic fly-in/swipe for faster pacing
+    if queries:
+        web_imgs = search_exact_topic_images(queries[0], out_dir, max_images=2)
+        for w_i, w_img in enumerate(web_imgs):
+            dyn_mp4 = out_dir / f"dyn_photo_{w_i}.mp4"
+            render_dynamic_photo_clip(w_img, dyn_mp4, duration_sec=3.8, style_idx=w_i)
+            downloaded_clips.insert(min(len(downloaded_clips), w_i * 2 + 1), dyn_mp4)
 
     return downloaded_clips
 
@@ -1104,12 +1216,19 @@ def assemble_short_video(
     normalized_clips: List[Path] = []
     for idx, clip in enumerate(clips):
         norm_path = work_dir / f"norm_{idx}.mp4"
+        if clip.name.startswith("dyn_photo_"):
+            subprocess.run(
+                ["ffmpeg", "-y", "-stream_loop", "-1", "-i", str(clip), "-t", f"{segment_duration:.2f}", "-vf", "setsar=1,fps=30,format=yuv420p", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(norm_path)],
+                check=True,
+            )
+            normalized_clips.append(norm_path)
+            continue
         vf_complex = (
             "[0:v]split=2[bg][fg];"
             "[bg]scale=135:240:force_original_aspect_ratio=increase,"
             "crop=135:240,boxblur=4:1,scale=1080:1920,eq=brightness=-0.15[bg_blur];"
             "[fg]scale=1080:1240:force_original_aspect_ratio=decrease[fg_fit];"
-            "[bg_blur][fg_fit]overlay=(W-w)/2:(H-h)/2-40,fps=30,format=yuv420p[out]"
+            "[bg_blur][fg_fit]overlay=(W-w)/2:(H-h)/2-40,setsar=1,fps=30,format=yuv420p[out]"
         )
         cmd = [
             "ffmpeg",
