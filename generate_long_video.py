@@ -156,12 +156,18 @@ def load_history() -> dict:
     return {"topics": [], "videos": []}
 
 
-def save_history(topic: str, video_id: Optional[str], title: str, category: str) -> None:
+def save_history(topic: str, video_id: Optional[str], title: str, category: str, chapter_titles: Optional[List[str]] = None) -> None:
     data = load_history()
     topics = data.get("topics", [])
     if topic not in topics:
         topics.append(topic)
     data["topics"] = topics[-120:]
+    if chapter_titles:
+        chapters = data.get("chapters", [])
+        for ct in chapter_titles:
+            if ct and ct not in chapters:
+                chapters.append(ct)
+        data["chapters"] = chapters[-250:]
     if video_id:
         videos = data.get("videos", [])
         videos.append(
@@ -1253,6 +1259,14 @@ def upload_long_to_facebook(video_path: Path, title: str, description: str) -> N
         "description": description[:4000],
         "access_token": access_token,
     }
+    ist_now = datetime.now(IST_TZ)
+    target_ist = ist_now.replace(hour=20, minute=30, second=0, microsecond=0)
+    if ist_now <= target_ist - timedelta(minutes=12):
+        finish_data["published"] = "false"
+        finish_data["scheduled_publish_time"] = str(int(target_ist.timestamp()))
+        print(f"[INFO] Scheduling Facebook Long Video for 8:30 PM IST ({target_ist.isoformat()})!")
+    else:
+        finish_data["published"] = "true"
     thumb_path = WORK_DIR / "long_thumb.jpg"
     if thumb_path.exists():
         with open(thumb_path, "rb") as tf:

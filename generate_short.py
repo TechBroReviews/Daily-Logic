@@ -730,6 +730,8 @@ def fetch_short_topic_image(query: str, out_jpg: Path) -> bool:
             timeout=20,
         )
         for h in r.json().get("hits", []):
+            if not _query_matches_tags(query, h.get("tags", "")):
+                continue
             url = h.get("largeImageURL") or h.get("webformatURL")
             if url:
                 out_jpg.write_bytes(requests.get(url, timeout=30).content)
