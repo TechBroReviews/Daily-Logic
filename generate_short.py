@@ -1309,7 +1309,15 @@ def compute_voice_rms_envelope(audio_mp3: Path, fps: int = 30, work_dir: Path = 
         rms = math.sqrt(sum(s * s for s in chunk) / len(chunk)) / 32768.0
         rms_list.append(rms)
     peak = max(rms_list) if rms_list else 1.0
-    return [min(1.0, r / max(0.05, peak * 0.7)) for r in rms_list]
+    norm = [min(1.0, r / max(0.05, peak * 0.7)) for r in rms_list]
+    # Asymmetric Attack/Release EMA smoothing for natural, flicker-free lip-sync
+    smoothed: List[float] = []
+    prev = 0.0
+    for val in norm:
+        alpha = 0.55 if val > prev else 0.24
+        prev = alpha * val + (1.0 - alpha) * prev
+        smoothed.append(prev)
+    return smoothed
 
 
 def render_karaoke_and_host_overlay_mov(
@@ -1372,6 +1380,8 @@ def render_karaoke_and_host_overlay_mov(
 
     try:
         cue_idx = 0
+        mouth_state = "closed"
+        mouth_hold = 0
         for f in range(total_frames):
             t = f / fps
             frame = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -1382,16 +1392,32 @@ def render_karaoke_and_host_overlay_mov(
                 rms = rms_env[f] if f < len(rms_env) else 0.0
                 is_blink = (f % 105) in (98, 99, 100, 101)
                 gest_slot = int(t / 1.4) % 6
-                if is_blink and rms < 0.16:
+                # Hysteresis + minimum 3-frame hold (~100ms) for smooth lip-sync
+                if rms > 0.46:
+                    target_mouth = "open"
+                elif rms > 0.15:
+                    target_mouth = "half"
+                elif rms < 0.10:
+                    target_mouth = "closed"
+                else:
+                    target_mouth = mouth_state
+
+                if target_mouth != mouth_state and mouth_hold <= 0:
+                    mouth_state = target_mouth
+                    mouth_hold = 3
+                else:
+                    mouth_hold = max(0, mouth_hold - 1)
+
+                if is_blink and mouth_state == "closed":
                     sp = host_sprites["blink"]
-                elif rms > 0.48:
+                elif mouth_state == "open":
                     if gest_slot in (0, 3) and "excited" in host_sprites:
                         sp = host_sprites["excited"]
                     elif gest_slot in (1, 4) and "point" in host_sprites:
                         sp = host_sprites["point"]
                     else:
                         sp = host_sprites["open"]
-                elif rms > 0.14:
+                elif mouth_state == "half":
                     if gest_slot in (1, 4) and "tilt" in host_sprites:
                         sp = host_sprites["tilt"]
                     else:
