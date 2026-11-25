@@ -1,0 +1,23 @@
+[
+  {
+    "date": "2026-11-26",
+    "category": "science",
+    "topic": "How Deep-Sea Submarines Survive Crushing Ocean Pressure (Mariana Trench Physics)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 16:9 Landscape -> 8s",
+    "flow_prompt": "Wide 16:9 cinematic 3D underwater documentary animation of a glowing titanium research submarine descending into the pitch-black Mariana Trench, surrounded by bioluminescent sea creatures and glowing cyan pressure force lines around the spherical hull. Include crisp realistic sound effects: deep underwater sonar ping, muffled ocean pressure creaks, and low submarine thruster hum, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-11-29",
+    "category": "myth_vs_fact",
+    "topic": "5 Everyday Health & Science Myths Everyone Still Believes (Fact-Checked)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 16:9 Landscape -> 8s",
+    "flow_prompt": "Wide 16:9 sleek educational studio 3D animation showing a glowing glass brain, coffee cup, and lightning bolt floating over a futuristic dark navy blueprint grid with clean golden fact-check checkmarks lighting up. Include realistic sound effects: crisp glass chime, subtle futuristic UI whoosh, and clean checkmark pop sound, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-12-01",
+    "category": "everyday_tech",
+    "topic": "How Fiber Optic Cables Carry the Entire Internet Under the Ocean at Light Speed",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 16:9 Landscape -> 8s",
+    "flow_prompt": "Wide 16:9 dramatic 3D cross-section animation of an armored submarine fiber optic cable resting on the deep ocean floor, with brilliant pulses of cyan and magenta laser light racing through hair-thin glass strands inside. Include realistic sound effects: high-speed fiber optic data pulse whooshes and deep underwater ambient hum, no speech, no music, 4K"
+  }
+]

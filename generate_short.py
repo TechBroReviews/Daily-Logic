@@ -1630,6 +1630,27 @@ def assemble_short_video(
             sfx_filters.append(f"[3:a]adelay={ms}|{ms},volume=0.28{lbl}")
             mix_labels.append(lbl)
 
+    # Mix native Sound Effects (SFX) from Google Flow clips in assets/weekly_clips/ at 25% volume
+    for fc_i, fc_path in enumerate(clips):
+        try:
+            if fc_path.resolve().parent == WEEKLY_CLIPS_DIR.resolve():
+                has_aud = subprocess.check_output(
+                    ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(fc_path)],
+                    text=True,
+                ).strip()
+                if "audio" in has_aud:
+                    in_idx = len(sfx_inputs) // 2
+                    sfx_inputs.extend(["-i", str(fc_path)])
+                    delay_ms = int(fc_i * segment_duration * 1000)
+                    fade_st = max(0.2, segment_duration - 0.4)
+                    lbl = f"[flow{fc_i}]"
+                    sfx_filters.append(
+                        f"[{in_idx}:a]atrim=0:{segment_duration:.2f},asetpts=PTS-STARTPTS,afade=t=out:st={fade_st:.2f}:d=0.4,adelay={delay_ms}|{delay_ms},volume=0.25{lbl}"
+                    )
+                    mix_labels.append(lbl)
+        except Exception:
+            pass
+
     sfx_filters.append(
         f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=first:dropout_transition=2:normalize=0[aout]"
     )
@@ -2094,6 +2115,48 @@ def generate_refresh_token_interactive() -> None:
 # ---------------------------------------------------------------------------
 # Main Pipeline Execution
 # ---------------------------------------------------------------------------
+
+WEEKLY_QUEUE_FILE = Path("weekly_queue.json")
+WEEKLY_CLIPS_DIR = Path("assets/weekly_clips")
+
+
+def get_today_ist_str() -> str:
+    return datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+
+
+def get_today_weekly_topic() -> Optional[dict]:
+    """Checks weekly_queue.json for a pre-planned topic matching today's IST date."""
+    if not WEEKLY_QUEUE_FILE.exists():
+        return None
+    try:
+        items = json.loads(WEEKLY_QUEUE_FILE.read_text(encoding="utf-8"))
+        today_str = get_today_ist_str()
+        for item in items:
+            if isinstance(item, dict) and item.get("date") == today_str and item.get("topic"):
+                return {
+                    "title": item["topic"],
+                    "link": item.get("source_url", "https://www.youtube.com/@DailyLogicMalayalam"),
+                }
+    except Exception as exc:
+        print(f"[WARN] Could not read weekly_queue.json: {exc}")
+    return None
+
+
+def get_today_weekly_clips() -> List[Path]:
+    """Loads pre-uploaded Google Flow AI clips from assets/weekly_clips/YYYY-MM-DD*.mp4."""
+    if not WEEKLY_CLIPS_DIR.exists():
+        return []
+    today_str = get_today_ist_str()
+    found: List[Path] = []
+    exact = WEEKLY_CLIPS_DIR / f"{today_str}.mp4"
+    if exact.exists() and exact.stat().st_size > 10_000:
+        found.append(exact)
+    for extra in sorted(WEEKLY_CLIPS_DIR.glob(f"{today_str}_*.mp4")):
+        if extra.stat().st_size > 10_000 and extra not in found:
+            found.append(extra)
+    return found
+
+
 def main() -> None:
     if "--auth" in sys.argv:
         generate_refresh_token_interactive()
@@ -2125,7 +2188,11 @@ def main() -> None:
     final_video_path = WORK_DIR / "final_short.mp4"
 
     print("[1/7] Finding a trending Everyday Curiosity / Fact-Check topic...")
-    topic_info = fetch_daily_topic()
+    topic_info = get_today_weekly_topic()
+    if topic_info:
+        print("      [WEEKLY QUEUE] Using pre-planned topic for today!")
+    else:
+        topic_info = fetch_daily_topic()
     print(f"      Selected topic: {topic_info['title']}")
 
     print("[2/7] Writing unique, human-tone Malayalam script with Gemini...")
@@ -2137,7 +2204,11 @@ def main() -> None:
     create_voiceover_and_srt(plan.narration_malayalam, audio_path, srt_path)
 
     print("[4/7] Downloading stock video clips...")
+    flow_clips = get_today_weekly_clips()
     clips = download_stock_clips(plan.search_queries, WORK_DIR)
+    if flow_clips:
+        print(f"      [GOOGLE FLOW] Prepending {len(flow_clips)} custom AI clip(s) from assets/weekly_clips/!")
+        clips = flow_clips + clips
 
     print("[5/7] Generating colorful curiosity thumbnail & rendering fast 1080x1920 video...")
     font_path = find_malayalam_font()

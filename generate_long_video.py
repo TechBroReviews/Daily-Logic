@@ -186,7 +186,7 @@ def save_history(topic: str, video_id: Optional[str], title: str, category: str,
 # ---------------------------------------------------------------------------
 # Step 1: Grounded Topic Research & Fact-Checked Script Generation
 # ---------------------------------------------------------------------------
-def generate_fact_checked_plan(category: str) -> tuple[str, LongVideoPlan]:
+def generate_fact_checked_plan(category: str, topic_override: Optional[str] = None) -> tuple[str, LongVideoPlan]:
     if not GEMINI_API_KEY:
         sys.exit("Error: GEMINI_API_KEY is not set.")
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -197,7 +197,8 @@ def generate_fact_checked_plan(category: str) -> tuple[str, LongVideoPlan]:
     models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]
 
     # Pass 1: Web-grounded topic selection + verified factual notes
-    research_prompt = f"""
+    override_note = f"MANDATORY TOPIC FOR TODAY: Research and cover this exact topic: {topic_override}\n\n" if topic_override else ""
+    research_prompt = f"""{override_note}
 You are a science & engineering researcher for the Malayalam YouTube channel "Daily Logic Malayalam".
 Category for today: {cat_info['label']}
 Focus: {cat_info['prompt_focus']}
@@ -939,6 +940,43 @@ def fetch_landscape_clip(query: str, out_mp4: Path) -> bool:
     return False
 
 
+
+WEEKLY_LONG_QUEUE_FILE = Path("weekly_long_queue.json")
+WEEKLY_LONG_CLIPS_DIR = Path("assets/weekly_long_clips")
+
+
+def get_today_ist_str() -> str:
+    return datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%d")
+
+
+def get_today_weekly_long_topic() -> Optional[dict]:
+    if not WEEKLY_LONG_QUEUE_FILE.exists():
+        return None
+    try:
+        items = json.loads(WEEKLY_LONG_QUEUE_FILE.read_text(encoding="utf-8"))
+        today_str = get_today_ist_str()
+        for item in items:
+            if isinstance(item, dict) and item.get("date") == today_str and item.get("topic"):
+                return item
+    except Exception as exc:
+        print(f"[WARN] Could not read weekly_long_queue.json: {exc}")
+    return None
+
+
+def get_today_weekly_long_clips() -> List[Path]:
+    if not WEEKLY_LONG_CLIPS_DIR.exists():
+        return []
+    today_str = get_today_ist_str()
+    found: List[Path] = []
+    exact = WEEKLY_LONG_CLIPS_DIR / f"{today_str}.mp4"
+    if exact.exists() and exact.stat().st_size > 10_000:
+        found.append(exact)
+    for extra in sorted(WEEKLY_LONG_CLIPS_DIR.glob(f"{today_str}_*.mp4")):
+        if extra.stat().st_size > 10_000 and extra not in found:
+            found.append(extra)
+    return found
+
+
 def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     font_path = find_malayalam_font()
@@ -954,6 +992,19 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
 
     # Pre-fetch lead clips from all 5 chapters for a dynamic 5-clip Intro Montage!
     intro_montage_clips: List[Path] = []
+    for f_idx, fclip in enumerate(get_today_weekly_long_clips()):
+        norm_f = WORK_DIR / f"flow_long_{f_idx}.mp4"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(fclip),
+                "-vf", "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,setsar=1,fps=30,format=yuv420p",
+                "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", str(norm_f),
+            ],
+            check=True,
+        )
+        intro_montage_clips.append(norm_f)
+    if intro_montage_clips:
+        print(f"      [GOOGLE FLOW] Added {len(intro_montage_clips)} custom 16:9 AI clip(s) to Long Video Intro!")
     for c_idx, ch in enumerate(plan.chapters, start=1):
         lead_mp4 = WORK_DIR / f"ch_{c_idx}_clip_0.mp4"
         for q in ch.search_queries:
@@ -985,14 +1036,36 @@ def build_long_video(plan: LongVideoPlan) -> tuple[Path, Path, str]:
     intro_raw = WORK_DIR / "intro_raw.mp4"
     subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(intro_concat_txt), "-c", "copy", str(intro_raw)], check=True)
     intro_seg = WORK_DIR / "seg_intro.mp4"
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-i", str(intro_raw), "-i", str(intro_mp3),
-            "-map", "0:v:0", "-map", "1:a:0", "-t", f"{intro_dur:.2f}",
-            "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
-        ],
-        check=True,
-    )
+    flow_long_clips = get_today_weekly_long_clips()
+    flow_audio_ok = False
+    if flow_long_clips:
+        try:
+            has_aud = subprocess.check_output(
+                ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(flow_long_clips[0])],
+                text=True,
+            ).strip()
+            flow_audio_ok = "audio" in has_aud
+        except Exception:
+            flow_audio_ok = False
+    if flow_audio_ok:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(intro_raw), "-i", str(intro_mp3), "-i", str(flow_long_clips[0]),
+                "-filter_complex", "[1:a]volume=1.0[vo];[2:a]volume=0.25[sfx];[vo][sfx]amix=inputs=2:duration=first:dropout_transition=2:normalize=0[aout]",
+                "-map", "0:v:0", "-map", "[aout]", "-t", f"{intro_dur:.2f}",
+                "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
+            ],
+            check=True,
+        )
+    else:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(intro_raw), "-i", str(intro_mp3),
+                "-map", "0:v:0", "-map", "1:a:0", "-t", f"{intro_dur:.2f}",
+                "-c:v", "copy", "-c:a", "aac", "-ac", "2", "-ar", "44100", "-b:a", "192k", "-shortest", str(intro_seg),
+            ],
+            check=True,
+        )
     segments.append(intro_seg)
     elapsed += intro_dur
 
@@ -1367,7 +1440,12 @@ def main() -> None:
 
     category = get_today_category()
     print(f"[1/4] Generating fact-checked 8-10 min Malayalam plan for: {CATEGORY_META[category]['label']}...")
-    topic_title, plan = generate_fact_checked_plan(category)
+    w_long = get_today_weekly_long_topic()
+    if w_long:
+        print("      [WEEKLY LONG QUEUE] Using pre-planned Long Video topic for today!")
+        topic_title, plan = generate_fact_checked_plan(w_long.get("category", category), topic_override=w_long["topic"])
+    else:
+        topic_title, plan = generate_fact_checked_plan(category)
     print(f"      Topic: {topic_title}")
 
     print("[2/4] Rendering 1920x1080 video with chapters & callouts...")

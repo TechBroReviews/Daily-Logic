@@ -1,0 +1,44 @@
+[
+  {
+    "date": "2026-11-26",
+    "topic": "Why Lightning Also Strikes Upward From the Ground (Stepped Leaders Physics)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 ultra-slow-motion cinematic science animation of a dark storm cloud over a tall city tower, glowing blue downward lightning branches meeting a bright golden upward lightning leader rising from the ground in a dramatic electric flash. Include crisp realistic sound effects: deep rolling thunder rumble, sharp electric crackle, and bright lightning snap, no speech, no background music, 4K"
+  },
+  {
+    "date": "2026-11-27",
+    "topic": "Why Time Moves Slower Near a Black Hole (Gravitational Time Dilation)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 cinematic space animation of a glowing golden wristwatch orbiting a swirling black hole accretion disk, clock hands slowing down dramatically as spacetime warps around it. Include realistic sound effects: deep cosmic sub-bass hum and crisp mechanical clock ticks slowing down into slow-motion echoes, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-11-28",
+    "topic": "How GPS Satellites Use Einstein's Relativity So Google Maps Never Drifts",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 cinematic 3D space-to-Earth animation of a glowing GPS satellite orbiting Earth sending cyan laser timing beams down to a smartphone navigation map on a city road, golden relativistic clock rings pulsing around the satellite. Include realistic sound effects: subtle futuristic satellite radio ping, high-tech digital lock-on chime, and soft city traffic ambience, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-11-29",
+    "topic": "Why the Sky Is Blue During the Day but Red at Sunset (Rayleigh Scattering)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 scientific Earth atmosphere cross-section animation showing white sunlight rays splitting into scattered blue light overhead and warm crimson-orange rays stretching across the sunset horizon. Include realistic sound effects: gentle high-altitude wind breeze and soft crystalline shimmer as light scatters, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-11-30",
+    "topic": "How Smartphones Know Which Way Is Up (MEMS Gyroscope & Accelerometer)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 futuristic X-ray 3D animation zooming inside a rotating smartphone to reveal a microscopic glowing silicon MEMS gyroscope vibrating with golden micro-springs. Include realistic sound effects: sleek mechanical zoom whoosh, subtle precision micro-click, and clean electronic hum, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-12-01",
+    "topic": "Why Giant Steel Ships Float on Water Even Though Steel Sinks (Buoyancy Physics)",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 3D X-ray cross-section animation of a massive cargo ship floating on ocean waves, revealing hollow air chambers inside the hull and glowing cyan upward buoyancy force arrows balancing downward gravity. Include realistic sound effects: deep ocean waves splashing against steel hull and low underwater hydrophone rumble, no speech, no music, 4K"
+  },
+  {
+    "date": "2026-12-02",
+    "topic": "How Induction Cooktops Heat the Pan Without Getting Hot Themselves",
+    "flow_settings": "Google Flow -> Veo 3.1 Lite -> 9:16 Vertical -> 8s",
+    "flow_prompt": "Vertical 9:16 3D cut-away animation of a sleek black induction stove with glowing blue electromagnetic coils beneath glass creating swirling orange eddy currents inside a stainless steel pan. Include realistic sound effects: subtle electromagnetic induction buzz, gentle pan sizzle, and crisp kitchen ambience, no speech, no music, 4K"
+  }
+]
