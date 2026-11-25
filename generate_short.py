@@ -549,7 +549,17 @@ def download_stock_clips(queries: List[str], out_dir: Path) -> List[Path]:
             except Exception as exc:
                 print(f"[WARN] Pixabay video fetch failed for '{query}': {exc}")
 
-        # Relevant Photo + Ken Burns fallback if no matching video was found (never download unrelated stock!)
+        # Free NASA / Openverse / Wikimedia Commons + Pixabay photo dynamic animation fallback!
+        if not got_clip:
+            free_imgs = fetch_nasa_or_openverse_or_wikimedia_images(query, out_dir, max_images=1)
+            if not free_imgs:
+                free_imgs = search_exact_topic_images(query, out_dir, max_images=1)
+            if free_imgs:
+                dyn_c = out_dir / f"dyn_photo_q{idx}.mp4"
+                render_dynamic_photo_clip(free_imgs[0], dyn_c, duration_sec=3.8, style_idx=idx)
+                downloaded_clips.append(dyn_c)
+                got_clip = True
+
         if not got_clip and pixabay_key:
             photo_tmp = out_dir / f"raw_photo_{idx}.jpg"
             if fetch_short_topic_image(query, photo_tmp):
@@ -1182,6 +1192,272 @@ def render_2d_motion_card_clip(
             raise RuntimeError(f"FFmpeg 2D card render failed with exit code {ret}")
 
 
+
+# ---------------------------------------------------------------------------
+# Additional Free Royalty-Free Media APIs (No API Key Needed: NASA, Openverse, Wikimedia)
+# ---------------------------------------------------------------------------
+def fetch_nasa_or_openverse_or_wikimedia_images(query: str, out_dir: Path, max_images: int = 2) -> List[Path]:
+    saved: List[Path] = []
+    if not query.strip():
+        return saved
+    headers = {"User-Agent": "DailyLogicMalayalamBot/1.0 (contact@dailylogic.local)"}
+
+    # 1. NASA Images & Video Library API (100% free, no auth)
+    if any(k in query.lower() for k in ("space", "earth", "moon", "sun", "planet", "rocket", "star", "sky", "mars", "nasa", "climate")):
+        try:
+            r = requests.get(
+                "https://images-api.nasa.gov/search",
+                params={"q": query, "media_type": "image"},
+                headers=headers,
+                timeout=12,
+            )
+            for item in (r.json().get("collection", {}).get("items", []) if r.ok else [])[:5]:
+                if len(saved) >= max_images:
+                    break
+                links = item.get("links", [])
+                if links and links[0].get("href"):
+                    ir = requests.get(links[0]["href"], headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 15000:
+                        out_p = out_dir / f"nasa_{len(saved)}.jpg"
+                        out_p.write_bytes(ir.content)
+                        with Image.open(out_p) as im:
+                            if im.width >= 450:
+                                im.convert("RGB").save(out_p, quality=92)
+                                saved.append(out_p)
+                                print(f"[INFO] Fetched NASA image for '{query}'")
+        except Exception as exc:
+            print(f"[WARN] NASA API skipped: {exc}")
+
+    # 2. Openverse API (100% free CC0/CC-BY, no auth)
+    if len(saved) < max_images:
+        try:
+            r = requests.get(
+                "https://api.openverse.org/v1/images/",
+                params={"q": query, "license_type": "commercial,modification", "page_size": 5},
+                headers=headers,
+                timeout=12,
+            )
+            for res in (r.json().get("results", []) if r.ok else []):
+                if len(saved) >= max_images:
+                    break
+                img_u = res.get("url")
+                if img_u and not img_u.lower().endswith(".svg"):
+                    ir = requests.get(img_u, headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 15000:
+                        out_p = out_dir / f"openverse_{len(saved)}.jpg"
+                        out_p.write_bytes(ir.content)
+                        with Image.open(out_p) as im:
+                            if im.width >= 450:
+                                im.convert("RGB").save(out_p, quality=92)
+                                saved.append(out_p)
+                                print(f"[INFO] Fetched Openverse CC0/commercial image for '{query}'")
+        except Exception as exc:
+            print(f"[WARN] Openverse API skipped: {exc}")
+
+    # 3. Wikimedia Commons API (100% free, no auth)
+    if len(saved) < max_images:
+        try:
+            r = requests.get(
+                "https://commons.wikimedia.org/w/api.php",
+                params={
+                    "action": "query", "generator": "search", "gsrsearch": query,
+                    "gsrnamespace": 6, "gsrlimit": 5, "prop": "imageinfo",
+                    "iiprop": "url|mime", "iiurlwidth": 1080, "format": "json",
+                },
+                headers=headers,
+                timeout=12,
+            )
+            pages = r.json().get("query", {}).get("pages", {}) if r.ok else {}
+            for p_info in pages.values():
+                if len(saved) >= max_images:
+                    break
+                ii = (p_info.get("imageinfo") or [{}])[0]
+                u = ii.get("thumburl") or ii.get("url")
+                if u and "image/" in ii.get("mime", "") and "svg" not in ii.get("mime", ""):
+                    ir = requests.get(u, headers=headers, timeout=15)
+                    if ir.ok and len(ir.content) > 15000:
+                        out_p = out_dir / f"wiki_{len(saved)}.jpg"
+                        out_p.write_bytes(ir.content)
+                        with Image.open(out_p) as im:
+                            if im.width >= 400:
+                                im.convert("RGB").save(out_p, quality=92)
+                                saved.append(out_p)
+                                print(f"[INFO] Fetched Wikimedia Commons image for '{query}'")
+        except Exception as exc:
+            print(f"[WARN] Wikimedia API skipped: {exc}")
+
+    return saved
+
+
+def compute_voice_rms_envelope(audio_mp3: Path, fps: int = 30, work_dir: Path = WORK_DIR) -> List[float]:
+    """Extracts normalized per-frame RMS loudness from voiceover.mp3 for ₹0 lip-sync."""
+    tmp_wav = work_dir / "vo_lipsync.wav"
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(audio_mp3), "-ac", "1", "-ar", "16000", str(tmp_wav)],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    with wave.open(str(tmp_wav), "rb") as wf:
+        sr = wf.getframerate()
+        raw = wf.readframes(wf.getnframes())
+    samples = struct.unpack(f"<{len(raw)//2}h", raw) if raw else ()
+    spf = max(1, sr // fps)
+    rms_list: List[float] = []
+    for i in range(0, len(samples), spf):
+        chunk = samples[i:i + spf]
+        if not chunk:
+            break
+        rms = math.sqrt(sum(s * s for s in chunk) / len(chunk)) / 32768.0
+        rms_list.append(rms)
+    peak = max(rms_list) if rms_list else 1.0
+    return [min(1.0, r / max(0.05, peak * 0.7)) for r in rms_list]
+
+
+def render_karaoke_and_host_overlay_mov(
+    cues: List[Tuple[float, float, str]],
+    audio_mp3: Path,
+    total_duration: float,
+    out_mov: Path,
+    font_path: str,
+    work_dir: Path,
+) -> None:
+    """
+    Renders a single transparent RGBA overlay video (.mov PNG-in-MOV) containing:
+      1. SpendWise-style Karaoke word-by-word highlighted Malayalam subtitles at the bottom.
+      2. Optional 2D Talking Cartoon Male Host (from assets/host/) lip-synced to voiceover RMS!
+    """
+    fps = 30
+    total_frames = max(30, int(round(total_duration * fps)))
+    W, H = 1080, 1920
+    lat_path = find_latin_font()
+    ml_f = ImageFont.truetype(font_path, 40)
+    lat_f = ImageFont.truetype(lat_path, 40)
+    dummy_d = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+
+    # Pre-load optional 2D host sprites if present in assets/host/ or host_assets/
+    host_dir = Path("assets/host") if (Path("assets/host") / "host_closed.png").exists() else Path("host_assets")
+    has_host = all((host_dir / fn).exists() for fn in ("host_closed.png", "host_half.png", "host_open.png", "host_blink.png"))
+    host_sprites = {}
+    rms_env: List[float] = []
+    if has_host:
+        for key, fn in (
+            ("closed", "host_closed.png"),
+            ("half", "host_half.png"),
+            ("open", "host_open.png"),
+            ("blink", "host_blink.png"),
+            ("point", "host_point.png"),
+            ("think", "host_think.png"),
+            ("excited", "host_excited.png"),
+            ("tilt", "host_tilt.png"),
+        ):
+            fp = host_dir / fn
+            if fp.exists():
+                host_sprites[key] = Image.open(fp).convert("RGBA").resize((330, 330), Image.Resampling.LANCZOS)
+        rms_env = compute_voice_rms_envelope(audio_mp3, fps=fps, work_dir=work_dir)
+        print(f"[INFO] 2D Talking Cartoon Host enabled ({len(host_sprites)} poses: lip-sync + gestures + blink)!")
+
+    # Pre-compute wrapped lines and word timings per cue for fast per-frame rendering
+    cue_layouts = []
+    for st, en, txt in cues:
+        lines = wrap_mixed_text_px(dummy_d, txt, ml_f, lat_f, 860)[:3]
+        words_flat = [w for ln in lines for w in ln.split()]
+        cue_layouts.append((st, en, lines, max(1, len(words_flat))))
+
+    cmd = [
+        "ffmpeg", "-y", "-f", "rawvideo", "-vcodec", "rawvideo",
+        "-s", f"{W}x{H}", "-pix_fmt", "rgba", "-r", str(fps), "-i", "-",
+        "-an", "-c:v", "qtrle", str(out_mov),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert proc.stdin is not None
+
+    try:
+        cue_idx = 0
+        for f in range(total_frames):
+            t = f / fps
+            frame = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(frame)
+
+            # 1. Composite 2D Talking Host cleanly on bottom-left (above subtitle box)
+            if has_host:
+                rms = rms_env[f] if f < len(rms_env) else 0.0
+                is_blink = (f % 105) in (98, 99, 100, 101)
+                gest_slot = int(t / 1.4) % 6
+                if is_blink and rms < 0.16:
+                    sp = host_sprites["blink"]
+                elif rms > 0.48:
+                    if gest_slot in (0, 3) and "excited" in host_sprites:
+                        sp = host_sprites["excited"]
+                    elif gest_slot in (1, 4) and "point" in host_sprites:
+                        sp = host_sprites["point"]
+                    else:
+                        sp = host_sprites["open"]
+                elif rms > 0.14:
+                    if gest_slot in (1, 4) and "tilt" in host_sprites:
+                        sp = host_sprites["tilt"]
+                    else:
+                        sp = host_sprites["half"]
+                else:
+                    if int(t / 3.5) % 3 == 1 and "think" in host_sprites:
+                        sp = host_sprites["think"]
+                    else:
+                        sp = host_sprites["closed"]
+                bob_y = int(4 * math.sin(t * 4.5)) if rms > 0.12 else int(2 * math.sin(t * 2.0))
+                sway_x = int(2 * math.sin(t * 1.8))
+                frame.alpha_composite(sp, (20 + sway_x, 1055 + bob_y))
+
+            # 2. Composite SpendWise-style Karaoke word-by-word highlighted subtitle box
+            while cue_idx < len(cue_layouts) and t > cue_layouts[cue_idx][1]:
+                cue_idx += 1
+            if cue_idx < len(cue_layouts):
+                st, en, lines, n_words = cue_layouts[cue_idx]
+                if st <= t <= en:
+                    dur = max(0.2, en - st)
+                    active_word_idx = min(n_words - 1, int(((t - st) / dur) * n_words))
+                    max_lw = max(measure_mixed_width(d, ln, ml_f, lat_f) for ln in lines)
+                    line_h = 56
+                    box_w = min(980, int(max_lw) + 76)
+                    box_h = len(lines) * line_h + 36
+                    x0 = (W - box_w) // 2
+                    y0 = 1560 - box_h // 2
+                    d.rounded_rectangle(
+                        [x0, y0, x0 + box_w, y0 + box_h],
+                        radius=26,
+                        fill=(10, 16, 34, 228),
+                        outline=(0, 229, 255, 220),
+                        width=3,
+                    )
+                    cur_y = y0 + 22 + 20
+                    w_counter = 0
+                    space_w = d.textlength(" ", font=ml_f)
+                    for ln in lines:
+                        lw = measure_mixed_width(d, ln, ml_f, lat_f)
+                        cur_x = (W - lw) / 2.0
+                        for w in ln.split():
+                            ww = measure_mixed_width(d, w, ml_f, lat_f)
+                            if w_counter == active_word_idx:
+                                d.rounded_rectangle(
+                                    [cur_x - 8, cur_y - 24, cur_x + ww + 8, cur_y + 24],
+                                    radius=12,
+                                    fill=(250, 204, 21, 255),
+                                )
+                                txt_col = (10, 16, 34, 255)
+                            else:
+                                txt_col = (255, 255, 255, 255)
+                            for seg, is_lat in _split_script_runs(w):
+                                fnt = lat_f if is_lat else ml_f
+                                d.text((cur_x, cur_y), seg, font=fnt, fill=txt_col, anchor="lm")
+                                cur_x += draw.textlength(seg, font=fnt) if False else d.textlength(seg, font=fnt)
+                            cur_x += space_w
+                            w_counter += 1
+                        cur_y += line_h
+
+            proc.stdin.write(frame.tobytes())
+    finally:
+        proc.stdin.close()
+        if proc.wait() != 0:
+            raise RuntimeError("Karaoke & 2D Host overlay render failed")
+
+
 def assemble_short_video(
     clips: List[Path],
     audio_path: Path,
@@ -1340,26 +1616,20 @@ def assemble_short_video(
         check=True,
     )
 
+    karaoke_host_mov = work_dir / "karaoke_host_overlay.mov"
+    render_karaoke_and_host_overlay_mov(cues, audio_path, audio_duration, karaoke_host_mov, font_path, work_dir)
+
     cmd_inputs = [
         "-i", str(merged_bg_path),
         "-i", str(mixed_audio_wav),
         "-i", str(header_png),
+        "-i", str(karaoke_host_mov),
     ]
     filter_parts = [
         "[0:v][2:v]overlay=0:90[vhead]",
+        "[vhead][3:v]overlay=0:0:shortest=1[vkh]",
     ]
-    last_label = "[vhead]"
-
-    for idx, (start_t, end_t, text) in enumerate(cues):
-        png_path = work_dir / f"sub_{idx}.png"
-        render_malayalam_subtitle_png(text, png_path, font_path)
-        cmd_inputs.extend(["-i", str(png_path)])
-        input_idx = idx + 3
-        out_label = f"[v{idx}]"
-        filter_parts.append(
-            f"{last_label}[{input_idx}:v]overlay=0:1390:enable='between(t,{start_t:.2f},{end_t:.2f})'{out_label}"
-        )
-        last_label = out_label
+    last_label = "[vkh]"
 
     wm_x = (
         "if(eq(mod(floor(t/8)\\,4)\\,0)\\,48\\,"
