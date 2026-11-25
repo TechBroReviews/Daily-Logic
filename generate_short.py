@@ -1726,20 +1726,29 @@ def upload_to_facebook_reels(
         print(f"[ERROR] Facebook upload HTTP {up_resp.status_code}: {up_resp.text}")
         up_resp.raise_for_status()
 
+    ist_now = datetime.now(timezone(timedelta(hours=5, minutes=30)))
+    target_ist = ist_now.replace(hour=20, minute=0, second=0, microsecond=0)
     fb_state = os.getenv("FB_VIDEO_STATE", "PUBLISHED").upper()
     finish_payload = {
         "upload_phase": "finish",
         "video_id": video_id,
-        "video_state": fb_state,
         "description": description,
         "title": title[:100],
         "access_token": access_token,
     }
-    if fb_state == "SCHEDULED":
-        publish_ts = int((datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)).timestamp())
-        finish_payload["scheduled_publish_time"] = str(publish_ts)
+    if ist_now <= target_ist - timedelta(minutes=15):
+        finish_payload["video_state"] = "SCHEDULED"
+        finish_payload["scheduled_publish_time"] = str(int(target_ist.timestamp()))
+        print(f"[INFO] Scheduling Facebook Reel for 8:00 PM IST ({target_ist.isoformat()})!")
+    else:
+        finish_payload["video_state"] = fb_state
 
     finish_resp = requests.post(start_url, data=finish_payload, timeout=30)
+    if not finish_resp.ok and finish_payload.get("video_state") == "SCHEDULED":
+        print(f"[WARN] FB Reel SCHEDULED rejected ({finish_resp.text[:120]}); publishing immediately...")
+        finish_payload.pop("scheduled_publish_time", None)
+        finish_payload["video_state"] = "PUBLISHED"
+        finish_resp = requests.post(start_url, data=finish_payload, timeout=30)
     if not finish_resp.ok:
         print(f"[ERROR] Facebook finish HTTP {finish_resp.status_code}: {finish_resp.text}")
         finish_resp.raise_for_status()
