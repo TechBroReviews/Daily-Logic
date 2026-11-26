@@ -1443,7 +1443,7 @@ def main() -> None:
     w_long = get_today_weekly_long_topic()
     if w_long:
         print("      [WEEKLY LONG QUEUE] Using pre-planned Long Video topic for today!")
-        topic_title, plan = generate_fact_checked_plan(w_long.get("category", category), topic_override=w_long["topic"])
+        topic_title, plan = generate_fact_checked_plan(w_long.get(category), topic_override=w_long["topic"])
     else:
         topic_title, plan = generate_fact_checked_plan(category)
     print(f"      Topic: {topic_title}")
