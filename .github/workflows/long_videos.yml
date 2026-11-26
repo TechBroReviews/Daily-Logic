@@ -1,11 +1,6 @@
 name: Daily Logic Malayalam Long Videos (Tue/Thu/Sun 8:30 PM IST)
 
 on:
-  schedule:
-    # 13:47 UTC = 7:17 PM IST (Tue, Thu, Sun) -> Off-:00 slot to avoid GitHub cron congestion; uploads YT Private (publishAt 8:30 PM IST)
-    - cron: "47 13 * * 2,4,0"
-    # 14:57 UTC = 8:27 PM IST (Tue, Thu, Sun) -> Off-:00 slot to publish cached video to Facebook Page Videos
-    - cron: "57 14 * * 2,4,0"
   workflow_dispatch:
     inputs:
       action_mode:
@@ -33,7 +28,7 @@ permissions:
 
 jobs:
   build-long-video-730pm:
-    if: github.event.schedule == '47 13 * * 2,4,0' || github.event.inputs.action_mode == 'full_730pm_build'
+    if: github.event.inputs.action_mode == 'full_730pm_build'
     runs-on: ubuntu-latest
     timeout-minutes: 35
 
@@ -95,7 +90,7 @@ jobs:
           fi
 
   publish-facebook-long-830pm:
-    if: github.event.schedule == '57 14 * * 2,4,0' || github.event.inputs.action_mode == 'publish_fb_now'
+    if: github.event.inputs.action_mode == 'publish_fb_now'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
