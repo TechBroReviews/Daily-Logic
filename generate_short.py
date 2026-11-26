@@ -27,7 +27,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Tuple
-
+from typing import Optional
 import edge_tts
 import requests
 from google import genai
