@@ -26,8 +26,7 @@ import urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import List, Tuple
-from typing import Optional
+from typing import List, Optional, Tuple
 import edge_tts
 import requests
 from google import genai
@@ -150,10 +149,6 @@ def get_youtube_service():
         token_uri="https://oauth2.googleapis.com/token",
         client_id=os.environ["YT_CLIENT_ID"].strip(),
         client_secret=os.environ["YT_CLIENT_SECRET"].strip(),
-        scopes=[
-            "https://www.googleapis.com/auth/youtube.upload",
-            "https://www.googleapis.com/auth/youtube.readonly",
-        ],
     )
     return build("youtube", "v3", credentials=creds)
 
@@ -1341,9 +1336,9 @@ def render_karaoke_and_host_overlay_mov(
     lat_f = ImageFont.truetype(lat_path, 40)
     dummy_d = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
 
-    # Pre-load optional 2D host sprites if present in assets/host/ or host_assets/
-    host_dir = Path("assets/host") if (Path("assets/host") / "host_closed.png").exists() else Path("host_assets")
-    has_host = all((host_dir / fn).exists() for fn in ("host_closed.png", "host_half.png", "host_open.png", "host_blink.png"))
+    # 2D cartoon host disabled (SpendWise-style Karaoke subtitles only)
+    host_dir = Path("assets/host")
+    has_host = False
     host_sprites = {}
     rms_env: List[float] = []
     if has_host:
