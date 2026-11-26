@@ -1,7 +1,8 @@
 {
   "topics": [
     "Everyday Myths Busted - Everyday Science & Engineering Explained",
-    "Why Is It Designed Like That? - Everyday Science & Engineering Explained"
+    "Why Is It Designed Like That? - Everyday Science & Engineering Explained",
+    "How It Actually Works - Everyday Science & Engineering Explained"
   ],
   "videos": [
     {
@@ -45,6 +46,13 @@
       "category": "myths_busted",
       "url": "https://www.youtube.com/watch?v=kRijRdQNsfo",
       "published_ist": "2026-11-25 04:59 IST"
+    },
+    {
+      "id": "Q3Zy_8JDhI0",
+      "title": "എന്തുകൊണ്ടാണ് നമ്മുടെ വീട്ടുപകരണങ്ങൾ ഇത്ര പെട്ടെന്ന് കേടാകുന്നത്? 🧐",
+      "category": "how_it_works",
+      "url": "https://www.youtube.com/watch?v=Q3Zy_8JDhI0",
+      "published_ist": "2026-11-26 18:47 IST"
     }
   ]
 }
