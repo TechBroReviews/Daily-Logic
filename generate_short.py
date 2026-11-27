@@ -2237,7 +2237,7 @@ def main() -> None:
     print(f"[6/6] Uploading video & thumbnail to YouTube as {PRIVACY_STATUS.upper()}...")
     upload_to_youtube(final_video_path, thumb_jpg, plan)
 
-    save_used_topic(topic_info["title"], topic_info["used_list"])
+    save_used_topic(topic_info["title"], topic_info.get("used_list") or load_used_topics())
     print("[DONE] 6:00 PM build finished (YouTube Private + cached for 7 PM IG & 8 PM FB Reels).")
 
 
